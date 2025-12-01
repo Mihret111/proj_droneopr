@@ -387,3 +387,74 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d) {
 
     exit(EXIT_SUCCESS);
 }
+
+/*MAIN: Sets up pipes and processes*/
+int main(void) {
+    // Each pipe is an array of 2 ints: [0]=read end, [1]=write end.
+    int pipe_I_to_B[2]; // from I to B
+    int pipe_B_to_D[2]; // from B to D
+    int pipe_D_to_B[2]; // from D to B
+
+    // Create all pipes.
+    if (pipe(pipe_I_to_B) == -1) die("pipe I->B");
+    if (pipe(pipe_B_to_D) == -1) die("pipe B->D");
+    if (pipe(pipe_D_to_B) == -1) die("pipe D->B");
+
+    // ---------------- Fork Keyboard Process (I) ----------------
+    pid_t pid_I = fork();
+    if (pid_I == -1) die("fork I");
+
+    if (pid_I == 0) {
+        // CHILD: I
+
+        // I only writes to pipe_I_to_B[1].
+        close(pipe_I_to_B[0]);   // close read end
+
+        // I does not use these pipes at all.
+        close(pipe_B_to_D[0]);
+        close(pipe_B_to_D[1]);
+        close(pipe_D_to_B[0]);
+        close(pipe_D_to_B[1]);
+
+        // Run keyboard logic. This function never returns.
+        run_keyboard_process(pipe_I_to_B[1]);
+    }
+
+    // ---------------- Fork Dynamics Process (D) ----------------
+    pid_t pid_D = fork();
+    if (pid_D == -1) die("fork D");
+
+    if (pid_D == 0) {
+        // CHILD: D
+
+        // D does not use the I->B pipe.
+        close(pipe_I_to_B[0]);
+        close(pipe_I_to_B[1]);
+
+        // D reads from B->D[0] and writes to D->B[1].
+        close(pipe_B_to_D[1]);   // close unused write end
+        close(pipe_D_to_B[0]);   // close unused read end
+
+        run_dynamics_process(pipe_B_to_D[0], pipe_D_to_B[1]);
+    }
+
+    // ---------------- PARENT: becomes Server B ----------------
+
+    // B reads from I->B[0].
+    close(pipe_I_to_B[1]);  // close unused write end
+
+    // B writes to B->D[1].
+    close(pipe_B_to_D[0]);  // close unused read end
+
+    // B reads from D->B[0].
+    close(pipe_D_to_B[1]);  // close unused write end
+
+    // Now run the server logic (ncurses UI + IPC).
+    run_server_process(pipe_I_to_B[0], pipe_B_to_D[1], pipe_D_to_B[0]);
+
+    // After server exits, wait for children to avoid zombies.
+    wait(NULL); // for one child
+    wait(NULL); // for the other child
+
+    return 0;
+}

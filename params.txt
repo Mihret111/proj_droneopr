@@ -1,0 +1,8 @@
+# Simulation parameters 
+# Format: key=value
+
+mass=1.0        # Drone mass M
+visc=1.0        # Viscous friction coefficient K
+dt=0.05         # Integration time step (seconds)
+force_step=5.0  # How much each key press changes the force
+world_half=50.0 # World range in both x and y: [-world_half, +world_half]

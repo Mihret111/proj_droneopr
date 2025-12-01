@@ -12,6 +12,16 @@
 #include <stdbool.h>    // bool, true, false
 
 
+// PARAM STRUCTURE:  Collecting all tunable parameters in one struct.
+// Each process (B and D) will use a copy of this, inherited after fork.
+typedef struct {
+    double mass;        // M
+    double visc;        // K
+    double dt;          // time step T
+    double force_step;  // how much each key increments the force
+    double world_half;  // world coordinate half-range (x,y ∈ [-world_half, +world_half])
+} SimParams;
+
  /*  MESSAGE STRUCTURES  fo use over pipes)*/
 
 // Key input from I to B
@@ -23,7 +33,9 @@ typedef struct {
 typedef struct {
     double Fx;
     double Fy;
+    int    reset;   // 0 = normal, 1 = reset
 } ForceStateMsg;
+
 
 // Drone state from D to B
 typedef struct {
@@ -44,6 +56,93 @@ void die(const char *msg) {
     perror(msg);
     exit(EXIT_FAILURE);
 }
+
+/*PARAMETER LOADING (params.txt)*/
+
+// Initialize default parameter values.
+void init_default_params(SimParams *p) {
+    p->mass       = 1.0;
+    p->visc       = 1.0;
+    p->dt         = 0.05;
+    p->force_step = 5.0;
+    p->world_half = 50.0;
+}
+
+// Trim leading/trailing whitespace from a string (in place).
+static void trim(char *s) {
+    if (!s) return;
+    // trim leading
+    char *start = s;
+    while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r')
+        start++;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+
+    // trim trailing
+    size_t len = strlen(s);
+    while (len > 0 &&
+           (s[len-1] == ' ' || s[len-1] == '\t' || s[len-1] == '\n' || s[len-1] == '\r')) {
+        s[len-1] = '\0';
+        len--;
+    }
+}
+
+// Load parameters from a file with key=value lines, '#' comments.
+// Unknown keys are ignored; missing file uses defaults (already set).
+void load_params_from_file(const char *filename, SimParams *p) {
+    FILE *fp = fopen(filename, "r");
+    if (!fp) {
+        fprintf(stderr,
+                "[PARAMS] Could not open '%s'. Using default parameters.\n",
+                filename);
+        return;
+    }
+
+    fprintf(stderr, "[PARAMS] Loading parameters from '%s'...\n", filename);
+
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        // Remove leading/trailing whitespace
+        trim(line);
+        // Skip empty or comment lines
+        if (line[0] == '\0' || line[0] == '#')
+            continue;
+
+        // Split "key=value"
+        char *eq = strchr(line, '=');
+        if (!eq) continue;  // malformed line, ignore
+
+        *eq = '\0';
+        char *key = line;
+        char *val = eq + 1;
+
+        trim(key);
+        trim(val);
+
+        double d = strtod(val, NULL);
+
+        if (strcmp(key, "mass") == 0) {
+            p->mass = d;
+        } else if (strcmp(key, "visc") == 0) {
+            p->visc = d;
+        } else if (strcmp(key, "dt") == 0) {
+            p->dt = d;
+        } else if (strcmp(key, "force_step") == 0) {
+            p->force_step = d;
+        } else if (strcmp(key, "world_half") == 0) {
+            p->world_half = d;
+        } else {
+            fprintf(stderr, "[PARAMS] Unknown key '%s', ignoring.\n", key);
+        }
+    }
+
+    fclose(fp);
+
+    fprintf(stderr,
+            "[PARAMS] Loaded: mass=%.3f, visc=%.3f, dt=%.3f, force_step=%.3f, world_half=%.3f\n",
+            p->mass, p->visc, p->dt, p->force_step, p->world_half);
+}
+
+/*********************************************************************************** */
 
 /*KEY CLUSTER input- Given a key, fill dFx and dFy with unit direction components.
  *  B will multiply these by some "force_step" and accumulate.*/
@@ -78,8 +177,8 @@ void run_keyboard_process(int write_fd) {
 
     fprintf(stderr,
         "[I] Keyboard process started.\n"
-        "[I] Use the 3x3 cluster: w e r / s d f / x c v.\n"
-        "[I] Press 'q' to quit.\n");
+        "[I] Use w e r / s d f / x c v to command force.\n"
+        "[I] 'd' = brake, 'p' = pause, 'R' = reset, 'q' = quit.\n");
 
     while (1) {
         // getchar() blocks until user presses a key or EOF happens.
@@ -112,77 +211,79 @@ void run_keyboard_process(int write_fd) {
 }
 
 /* DYNAMICS PROCESS (D)*/
-void run_dynamics_process(int force_fd, int state_fd) {
+void run_dynamics_process(int force_fd, int state_fd, SimParams params) {
     setbuf(stdout, NULL);
-    fprintf(stderr, "[D] Dynamics process started.\n");
+    fprintf(stderr,
+            "[D] Dynamics process started. M=%.3f, K=%.3f, dt=%.3f\n",
+            params.mass, params.visc, params.dt);
 
-    // --- Simulation parameters ---
-    double M = 1.0;    // "mass" of the drone
-    double K = 1.0;    // viscous friction coefficient
-    double T = 0.05;   // simulation time step in seconds (20 Hz)
+    double M = params.mass;
+    double K = params.visc;
+    double T = params.dt;
 
-    // Start with zero force and zero state.
-    ForceStateMsg f = {0.0, 0.0};
+    ForceStateMsg f;
+    f.Fx = 0.0;
+    f.Fy = 0.0;
+    f.reset = 0;
+
     DroneStateMsg s = {0.0, 0.0, 0.0, 0.0};
 
-    // Make the force pipe non-blocking.
-    //   - read() will NOT block if there is no data.
-    //   - Instead, it will return -1 with errno = EAGAIN / EWOULDBLOCK.
+    // Non-blocking read on force_fd
     int flags = fcntl(force_fd, F_GETFL, 0);
     if (flags == -1) flags = 0;
     if (fcntl(force_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
         perror("[D] fcntl O_NONBLOCK");
-        // Not fatal, but means read() may block sometimes.
     }
 
     while (1) {
-        // --- 1) Try to read a new force command (non-blocking) ---
+        // 1) Try to read new force command
         ForceStateMsg new_f;
         int n = read(force_fd, &new_f, sizeof(new_f));
 
         if (n == (int)sizeof(new_f)) {
-            // We got a full ForceStateMsg, update f.
+            // Received a complete new force command
+            if (new_f.reset != 0) {
+                // Reset requested: zero state
+                s.x  = 0.0;
+                s.y  = 0.0;
+                s.vx = 0.0;
+                s.vy = 0.0;
+                // force in message might be zero; we adopt it
+            }
             f = new_f;
+            f.reset = 0;  // locally clear reset flag
         } else if (n == 0) {
-            // EOF on force pipe: B has closed the write end.
             fprintf(stderr, "[D] EOF on force pipe, exiting.\n");
             break;
         } else if (n < 0) {
-            // If there's simply no data, read fails with EAGAIN/EWOULDBLOCK.
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                // Any other error is unexpected → terminate.
                 perror("[D] read");
                 break;
             }
-            // If EAGAIN/EWOULDBLOCK, we just keep using old f.
         } else {
-            // Partial read (should not really happen here) → ignore.
             fprintf(stderr, "[D] Partial read (%d bytes) on force pipe.\n", n);
         }
 
-        // --- 2) Integrate dynamics one step ---
-        // dv/dt = (F - K v) / M
+        // 2) Integrate dynamics one time step
         double ax = (f.Fx - K * s.vx) / M;
         double ay = (f.Fy - K * s.vy) / M;
 
-        // Update velocities
         s.vx += ax * T;
         s.vy += ay * T;
 
-        // Update positions
         s.x  += s.vx * T;
         s.y  += s.vy * T;
 
-        // --- 3) Send updated state back to B ---
+        // 3) Send state to B
         if (write(state_fd, &s, sizeof(s)) == -1) {
             perror("[D] write state");
             break;
         }
 
-        // --- 4) Wait for the next time step ---
+        // 4) Sleep for T seconds
         struct timespec ts;
         ts.tv_sec  = 0;
-        ts.tv_nsec = (long)(T * 1e9); // T seconds in nanoseconds
+        ts.tv_nsec = (long)(T * 1e9);
         nanosleep(&ts, NULL);
     }
 
@@ -192,95 +293,91 @@ void run_dynamics_process(int force_fd, int state_fd) {
 }
 
 /* SERVER / BLACKBOARD PROCESS (B)*/
-void run_server_process(int fd_kb, int fd_to_d, int fd_from_d) {
-    // ---------------- ncurses initialization ----------------
-    initscr();     // start ncurses mode
-    cbreak();      // pass characters immediately, no line buffering
-    noecho();      // do not echo typed chars automatically
-    curs_set(0);   // hide the cursor (cosmetic)
+void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, SimParams params) {
+    // --- Init ncurses ---
+    initscr();
+    cbreak();
+    noecho();
+    curs_set(0);
 
-    // ---------------- open logfile ----------------
+    // --- Open logfile ---
     FILE *logfile = fopen("log.txt", "w");
     if (!logfile) {
         endwin();
         die("[B] cannot open log.txt");
     }
 
-    // ---------------- server-side state ----------------
-    ForceStateMsg cur_force = {0.0, 0.0};
-    DroneStateMsg cur_state = {0.0, 0.0, 0.0, 0.0};
-    double force_step = 5.0;    // how much one key "pushes" the force
-    char last_key = '?';        // last key seen from I
+    // --- Blackboard state ---
+    ForceStateMsg cur_force;
+    cur_force.Fx = 0.0;
+    cur_force.Fy = 0.0;
+    cur_force.reset = 0;
 
-    // Send initial zero force to D so it has something to start with.
+    DroneStateMsg cur_state = {0.0, 0.0, 0.0, 0.0};
+    char last_key = '?';
+    bool paused = false;  // pause flag
+
+    // Send initial zero-force to D
     if (write(fd_to_d, &cur_force, sizeof(cur_force)) == -1) {
+        fclose(logfile);
         endwin();
         die("[B] initial write to D failed");
     }
 
-    // ---------------- the main event loop ----------------
+    // --- Main loop ---
+    int max_y, max_x;
+
     while (1) {
-        // 1) Get current terminal size.
-        int max_y, max_x;
+        // 1) Get terminal size every loop (handle resize)
         getmaxyx(stdscr, max_y, max_x);
 
-        // Decide inspection panel width:
-        // We want some space for text but avoid negative or tiny widths.
+        // Compute inspection-right width and world-left width
         int insp_width = 35;
         if (max_x < insp_width + 10) {
-            // Terminal is narrow: shrink inspection width.
             insp_width = max_x / 3;
-            if (insp_width < 20) insp_width = 20; // minimum width for readability
+            if (insp_width < 20) insp_width = 20;
         }
 
-        // Column index where inspection area starts.
         int insp_start_x = max_x - insp_width;
         if (insp_start_x < 1) insp_start_x = 1;
 
-        // World (drone map) width = area to the left of inspection.
-        int main_width  = insp_start_x - 2; // -2 for outer border and separator
+        int main_width  = insp_start_x - 2; // left world inside borders
         if (main_width < 10) main_width = 10;
 
-        // World height uses rows inside the border.
-        int main_height = max_y - 2;
+        int main_height = max_y - 2;        // vertical world inside borders
         if (main_height < 5) main_height = 5;
 
-        // 2) Prepare fd_set for select().
+        // 2) Prepare fd_set and use select()
         fd_set rfds;
         int maxfd = imax(fd_kb, fd_from_d) + 1;
 
         int sel;
         while (1) {
             FD_ZERO(&rfds);
-            FD_SET(fd_kb, &rfds);
+            FD_SET(fd_kb,     &rfds);
             FD_SET(fd_from_d, &rfds);
 
-            // select() waits indefinitely (NULL timeout) until any FD has data.
             sel = select(maxfd, &rfds, NULL, NULL, NULL);
 
-             if (sel == -1) {
-                // If a signal interrupted select (like SIGWINCH on resize),
-                // errno will be EINTR. That is not a real error → just retry.
+            if (sel == -1) {
                 if (errno == EINTR) {
-                    // loop again and call select() once more
+                    // Interrupted by signal (e.g., resize SIGWINCH) → retry
                     continue;
                 } else {
-                    // Any other error is fatal.
+                    fclose(logfile);
                     endwin();
                     die("[B] select failed");
                 }
             }
-            // sel >= 0 → we have some event to handle.
+            // sel >= 0 -> at least one fd ready
             break;
         }
 
-        // 3) Handle keyboard messages from I (if available).
+        // 3) Keyboard input from I (if any)
         if (FD_ISSET(fd_kb, &rfds)) {
             KeyMsg km;
             int n = read(fd_kb, &km, sizeof(km));
-
             if (n <= 0) {
-                // Pipe closed (keyboard process ended).
                 mvprintw(0, 1, "[B] Keyboard process ended (EOF).");
                 refresh();
                 break;
@@ -288,41 +385,103 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d) {
 
             last_key = km.key;
 
-            // Global quit if 'q' is pressed.
+            // Global quit
             if (km.key == 'q') {
                 fprintf(logfile, "QUIT requested by 'q'\n");
                 fflush(logfile);
                 break;
             }
 
-            // Convert key → direction increments.
-            double dFx, dFy;
-            direction_from_key(km.key, &dFx, &dFy);
+            // Handle PAUSE toggle
+            if (km.key == 'p') {
+                paused = !paused;
+                if (paused) {
+                    // On entering pause: set force to zero and send it.
+                    cur_force.Fx = 0.0;
+                    cur_force.Fy = 0.0;
+                    cur_force.reset = 0;
+                    if (write(fd_to_d, &cur_force, sizeof(cur_force)) == -1) {
+                        fclose(logfile);
+                        endwin();
+                        die("[B] write to D failed (pause)");
+                    }
+                    fprintf(logfile, "PAUSE: ON\n");
+                } else {
+                    fprintf(logfile, "PAUSE: OFF\n");
+                }
+                fflush(logfile);
+            }
+            // Handle RESET (uppercase R)
+            else if (km.key == 'R') {
+                // Reset position & velocity in B
+                cur_state.x  = 0.0;
+                cur_state.y  = 0.0;
+                cur_state.vx = 0.0;
+                cur_state.vy = 0.0;
 
-            if (km.key == 'd') {
-                // Brake key: zero all forces.
+                // Reset forces
                 cur_force.Fx = 0.0;
                 cur_force.Fy = 0.0;
-            } else {
-                // Accumulate force command.
-                cur_force.Fx += dFx * force_step;
-                cur_force.Fy += dFy * force_step;
-            }
+                // Request D to also reset its internal state
+                cur_force.reset = 1;
 
-            // Send updated force to D.
-            if (write(fd_to_d, &cur_force, sizeof(cur_force)) == -1) {
-                endwin();
-                die("[B] write to D failed");
-            }
+                if (write(fd_to_d, &cur_force, sizeof(cur_force)) == -1) {
+                    fclose(logfile);
+                    endwin();
+                    die("[B] write to D failed (reset)");
+                }
+                // Clear reset flag locally for future messages
+                cur_force.reset = 0;
 
-            // Log key event.
-            fprintf(logfile,
-                    "KEY: %c  dFx=%.1f dFy=%.1f → Fx=%.2f Fy=%.2f\n",
-                    km.key, dFx, dFy, cur_force.Fx, cur_force.Fy);
-            fflush(logfile);
+                // Also unpause if it was paused
+                paused = false;
+
+                fprintf(logfile, "RESET requested (R)\n");
+                fflush(logfile);
+            }
+            // Direction / brake keys
+            else {
+                // Compute direction increments for possible directional keys
+                double dFx, dFy;
+                direction_from_key(km.key, &dFx, &dFy);
+
+                // If we are paused, ignore directional changes
+                if (!paused) {
+                    if (km.key == 'd') {
+                        // Brake key: zero forces
+                        cur_force.Fx = 0.0;
+                        cur_force.Fy = 0.0;
+                    } else {
+                        // Accumulate force using force_step from params
+                        cur_force.Fx += dFx * params.force_step;
+                        cur_force.Fy += dFy * params.force_step;
+                    }
+
+                    // For normal directional updates, reset=0
+                    cur_force.reset = 0;
+
+                    // Send updated force to D
+                    if (write(fd_to_d, &cur_force, sizeof(cur_force)) == -1) {
+                        fclose(logfile);
+                        endwin();
+                        die("[B] write to D failed (force)");
+                    }
+
+                    // Log key & resulting force
+                    fprintf(logfile,
+                            "KEY: %c  dFx=%.1f dFy=%.1f → Fx=%.2f Fy=%.2f\n",
+                            km.key, dFx, dFy, cur_force.Fx, cur_force.Fy);
+                    fflush(logfile);
+                } else {
+                    // Paused: we still update last_key but ignore changes to force.
+                    fprintf(logfile,
+                            "KEY: %c ignored (PAUSED)\n", km.key);
+                    fflush(logfile);
+                }
+            }
         }
 
-        // 4) Handle state messages from D (if available).
+        // 4) State updates from D (if any)
         if (FD_ISSET(fd_from_d, &rfds)) {
             DroneStateMsg s;
             int n = read(fd_from_d, &s, sizeof(s));
@@ -334,18 +493,17 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d) {
 
             cur_state = s;
 
-            // Log new state.
             fprintf(logfile,
                     "STATE: x=%.2f y=%.2f vx=%.2f vy=%.2f\n",
                     s.x, s.y, s.vx, s.vy);
             fflush(logfile);
         }
 
-        // ---------------- 5) Draw entire screen (stdscr) ----------------
-        erase();            // clear buffer
-        box(stdscr, 0, 0);  // draw outer border
+        // ---------------- 5) DRAW WORLD + INSPECTION ----------------
+        erase();
+        box(stdscr, 0, 0);
 
-        // Draw vertical separator between world area and inspection area.
+        // Separator between world and right-side inspection region
         int sep_x = insp_start_x - 1;
         if (sep_x > 1 && sep_x < max_x - 1) {
             for (int y = 1; y < max_y - 1; ++y) {
@@ -353,53 +511,46 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d) {
             }
         }
 
-        // Map physical coordinates to screen coordinates.
-        // Assume world roughly in [-50, 50] in both x and y.
-        double world_half = 50.0;
+        // Map world coordinates to screen coordinates
+        double world_half = params.world_half;
         double scale_x = main_width  / (2.0 * world_half);
         double scale_y = main_height / (2.0 * world_half);
 
         int sx = (int)(cur_state.x * scale_x) + main_width / 2 + 1;
         int sy = (int)(-cur_state.y * scale_y) + main_height / 2 + 1;
 
-        // Clamp drone visual position inside main area.
         if (sx < 1) sx = 1;
         if (sx > main_width) sx = main_width;
         if (sy < 1) sy = 1;
         if (sy > main_height) sy = main_height;
 
-        // Draw drone as a '+' character.
         mvaddch(sy, sx, '+');
 
+        // Top info line
+        mvprintw(1, 2,
+                 "Controls: w e r / s d f / x c v | d=brake, p=pause, R=reset, q=quit");
+        mvprintw(2, 2, "Paused: %s", paused ? "YES" : "NO");
 
-        // ---------------- 6) Draw inspection info (right side) ----------------
-        int info_y = 2;
+        // Right inspection text region
+        int info_y = 3;
         int info_x = insp_start_x + 1;
-
         if (info_x < max_x - 1) {
-
-        // Print control hint on top.
-            mvprintw(info_y,     info_x,
-                 "Controls: w e r / s d f / x c v");
-            mvprintw(info_y + 1,     info_x + 8 ,
-            "(d = brake, q = quit)");
-            mvprintw(info_y + 2, info_x, "INSPECTION");
-            mvprintw(info_y + 4, info_x, "Last key: %c", last_key);
-            mvprintw(info_y + 6, info_x, "Fx = %.2f", cur_force.Fx);
-            mvprintw(info_y + 7, info_x, "Fy = %.2f", cur_force.Fy);
-            mvprintw(info_y + 9, info_x, "x  = %.2f", cur_state.x);
-            mvprintw(info_y + 10, info_x, "y  = %.2f", cur_state.y);
-            mvprintw(info_y + 11, info_x, "vx = %.2f", cur_state.vx);
-            mvprintw(info_y +12, info_x, "vy = %.2f", cur_state.vy);
+            mvprintw(info_y,     info_x, "INSPECTION");
+            mvprintw(info_y + 2, info_x, "Last key: %c", last_key);
+            mvprintw(info_y + 4, info_x, "Fx = %.2f", cur_force.Fx);
+            mvprintw(info_y + 5, info_x, "Fy = %.2f", cur_force.Fy);
+            mvprintw(info_y + 7, info_x, "x  = %.2f", cur_state.x);
+            mvprintw(info_y + 8, info_x, "y  = %.2f", cur_state.y);
+            mvprintw(info_y + 9, info_x, "vx = %.2f", cur_state.vx);
+            mvprintw(info_y +10, info_x, "vy = %.2f", cur_state.vy);
         }
 
-        // Push all drawings to the actual terminal.
         refresh();
     }
 
-    // ---------------- clean up ----------------
+    // Cleanup
     fclose(logfile);
-    endwin();  // restore terminal to normal mode
+    endwin();
 
     close(fd_kb);
     close(fd_to_d);
@@ -410,71 +561,54 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d) {
 
 /*MAIN: Sets up pipes and processes*/
 int main(void) {
-    // Each pipe is an array of 2 ints: [0]=read end, [1]=write end.
-    int pipe_I_to_B[2]; // from I to B
-    int pipe_B_to_D[2]; // from B to D
-    int pipe_D_to_B[2]; // from D to B
+    // 1) Load parameters in master BEFORE fork so children inherit them
+    SimParams params;
+    init_default_params(&params);
+    load_params_from_file("params.txt", &params);
 
-    // Create all pipes.
+    // 2) Create pipes
+    int pipe_I_to_B[2]; // I -> B
+    int pipe_B_to_D[2]; // B -> D
+    int pipe_D_to_B[2]; // D -> B
+
     if (pipe(pipe_I_to_B) == -1) die("pipe I->B");
     if (pipe(pipe_B_to_D) == -1) die("pipe B->D");
     if (pipe(pipe_D_to_B) == -1) die("pipe D->B");
 
-    // ---------------- Fork Keyboard Process (I) ----------------
+    // 3) Fork Keyboard process (I)
     pid_t pid_I = fork();
     if (pid_I == -1) die("fork I");
 
     if (pid_I == 0) {
         // CHILD: I
-
-        // I only writes to pipe_I_to_B[1].
-        close(pipe_I_to_B[0]);   // close read end
-
-        // I does not use these pipes at all.
-        close(pipe_B_to_D[0]);
-        close(pipe_B_to_D[1]);
-        close(pipe_D_to_B[0]);
-        close(pipe_D_to_B[1]);
-
-        // Run keyboard logic. This function never returns.
+        close(pipe_I_to_B[0]);   // I only writes to I->B[1]
+        close(pipe_B_to_D[0]); close(pipe_B_to_D[1]);
+        close(pipe_D_to_B[0]); close(pipe_D_to_B[1]);
         run_keyboard_process(pipe_I_to_B[1]);
     }
 
-    // ---------------- Fork Dynamics Process (D) ----------------
+    // 4) Fork Dynamics process (D)
     pid_t pid_D = fork();
     if (pid_D == -1) die("fork D");
 
     if (pid_D == 0) {
         // CHILD: D
-
-        // D does not use the I->B pipe.
-        close(pipe_I_to_B[0]);
-        close(pipe_I_to_B[1]);
-
-        // D reads from B->D[0] and writes to D->B[1].
-        close(pipe_B_to_D[1]);   // close unused write end
-        close(pipe_D_to_B[0]);   // close unused read end
-
-        run_dynamics_process(pipe_B_to_D[0], pipe_D_to_B[1]);
+        close(pipe_I_to_B[0]); close(pipe_I_to_B[1]);
+        close(pipe_B_to_D[1]);   // D reads from B->D[0]
+        close(pipe_D_to_B[0]);   // D writes to D->B[1]
+        run_dynamics_process(pipe_B_to_D[0], pipe_D_to_B[1], params);
     }
 
-    // ---------------- PARENT: becomes Server B ----------------
+    // 5) PARENT: becomes Server B
+    close(pipe_I_to_B[1]);  // B reads from I->B[0]
+    close(pipe_B_to_D[0]);  // B writes to B->D[1]
+    close(pipe_D_to_B[1]);  // B reads from D->B[0]
 
-    // B reads from I->B[0].
-    close(pipe_I_to_B[1]);  // close unused write end
+    run_server_process(pipe_I_to_B[0], pipe_B_to_D[1], pipe_D_to_B[0], params);
 
-    // B writes to B->D[1].
-    close(pipe_B_to_D[0]);  // close unused read end
-
-    // B reads from D->B[0].
-    close(pipe_D_to_B[1]);  // close unused write end
-
-    // Now run the server logic (ncurses UI + IPC).
-    run_server_process(pipe_I_to_B[0], pipe_B_to_D[1], pipe_D_to_B[0]);
-
-    // After server exits, wait for children to avoid zombies.
-    wait(NULL); // for one child
-    wait(NULL); // for the other child
+    // 6) Wait for children to avoid zombies
+    wait(NULL);
+    wait(NULL);
 
     return 0;
 }

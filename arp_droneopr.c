@@ -31,6 +31,19 @@ typedef struct {
     double vx, vy;  // velocity
 } DroneStateMsg;
 
+/* UTILITY FUNCTIONS*/
+
+// Simple integer max: used to compute max FD for select().
+int imax(int a, int b) {
+    return (a > b) ? a : b;
+}
+
+// Kill program with error message.
+// use perror so we also see errno description.
+void die(const char *msg) {
+    perror(msg);
+    exit(EXIT_FAILURE);
+}
 
 /*KEY CLUSTER input- Given a key, fill dFx and dFy with unit direction components.
  *  B will multiply these by some "force_step" and accumulate.*/

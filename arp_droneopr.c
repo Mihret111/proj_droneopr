@@ -176,3 +176,214 @@ void run_dynamics_process(int force_fd, int state_fd) {
     close(state_fd);
     exit(EXIT_SUCCESS);
 }
+
+/* SERVER / BLACKBOARD PROCESS (B)*/
+void run_server_process(int fd_kb, int fd_to_d, int fd_from_d) {
+    // ---------------- ncurses initialization ----------------
+    initscr();     // start ncurses mode
+    cbreak();      // pass characters immediately, no line buffering
+    noecho();      // do not echo typed chars automatically
+    curs_set(0);   // hide the cursor (cosmetic)
+
+    // ---------------- open logfile ----------------
+    FILE *logfile = fopen("log.txt", "w");
+    if (!logfile) {
+        endwin();
+        die("[B] cannot open log.txt");
+    }
+
+    // ---------------- server-side state ----------------
+    ForceStateMsg cur_force = {0.0, 0.0};
+    DroneStateMsg cur_state = {0.0, 0.0, 0.0, 0.0};
+    double force_step = 5.0;    // how much one key "pushes" the force
+    char last_key = '?';        // last key seen from I
+
+    // Send initial zero force to D so it has something to start with.
+    if (write(fd_to_d, &cur_force, sizeof(cur_force)) == -1) {
+        endwin();
+        die("[B] initial write to D failed");
+    }
+
+    // ---------------- the main event loop ----------------
+    while (1) {
+        // 1) Get current terminal size.
+        int max_y, max_x;
+        getmaxyx(stdscr, max_y, max_x);
+
+        // Decide inspection panel width:
+        // We want some space for text but avoid negative or tiny widths.
+        int insp_width = 35;
+        if (max_x < insp_width + 10) {
+            // Terminal is narrow: shrink inspection width.
+            insp_width = max_x / 3;
+            if (insp_width < 20) insp_width = 20; // minimum width for readability
+        }
+
+        // Column index where inspection area starts.
+        int insp_start_x = max_x - insp_width;
+        if (insp_start_x < 1) insp_start_x = 1;
+
+        // World (drone map) width = area to the left of inspection.
+        int main_width  = insp_start_x - 2; // -2 for outer border and separator
+        if (main_width < 10) main_width = 10;
+
+        // World height uses rows inside the border.
+        int main_height = max_y - 2;
+        if (main_height < 5) main_height = 5;
+
+        // 2) Prepare fd_set for select().
+        fd_set rfds;
+        int maxfd = imax(fd_kb, fd_from_d) + 1;
+
+        int sel;
+        while (1) {
+            FD_ZERO(&rfds);
+            FD_SET(fd_kb, &rfds);
+            FD_SET(fd_from_d, &rfds);
+
+            // select() waits indefinitely (NULL timeout) until any FD has data.
+            sel = select(maxfd, &rfds, NULL, NULL, NULL);
+
+            if (sel == -1) {
+
+                    endwin();
+                    die("[B] select failed");
+                }
+            
+            // sel >= 0 → we have some event to handle.
+            break;
+        }
+
+        // 3) Handle keyboard messages from I (if available).
+        if (FD_ISSET(fd_kb, &rfds)) {
+            KeyMsg km;
+            int n = read(fd_kb, &km, sizeof(km));
+
+            if (n <= 0) {
+                // Pipe closed (keyboard process ended).
+                mvprintw(0, 1, "[B] Keyboard process ended (EOF).");
+                refresh();
+                break;
+            }
+
+            last_key = km.key;
+
+            // Global quit if 'q' is pressed.
+            if (km.key == 'q') {
+                fprintf(logfile, "QUIT requested by 'q'\n");
+                fflush(logfile);
+                break;
+            }
+
+            // Convert key → direction increments.
+            double dFx, dFy;
+            direction_from_key(km.key, &dFx, &dFy);
+
+            if (km.key == 'd') {
+                // Brake key: zero all forces.
+                cur_force.Fx = 0.0;
+                cur_force.Fy = 0.0;
+            } else {
+                // Accumulate force command.
+                cur_force.Fx += dFx * force_step;
+                cur_force.Fy += dFy * force_step;
+            }
+
+            // Send updated force to D.
+            if (write(fd_to_d, &cur_force, sizeof(cur_force)) == -1) {
+                endwin();
+                die("[B] write to D failed");
+            }
+
+            // Log key event.
+            fprintf(logfile,
+                    "KEY: %c  dFx=%.1f dFy=%.1f → Fx=%.2f Fy=%.2f\n",
+                    km.key, dFx, dFy, cur_force.Fx, cur_force.Fy);
+            fflush(logfile);
+        }
+
+        // 4) Handle state messages from D (if available).
+        if (FD_ISSET(fd_from_d, &rfds)) {
+            DroneStateMsg s;
+            int n = read(fd_from_d, &s, sizeof(s));
+            if (n <= 0) {
+                mvprintw(1, 1, "[B] Dynamics process ended (EOF).");
+                refresh();
+                break;
+            }
+
+            cur_state = s;
+
+            // Log new state.
+            fprintf(logfile,
+                    "STATE: x=%.2f y=%.2f vx=%.2f vy=%.2f\n",
+                    s.x, s.y, s.vx, s.vy);
+            fflush(logfile);
+        }
+
+        // ---------------- 5) Draw entire screen (stdscr) ----------------
+        erase();            // clear buffer
+        box(stdscr, 0, 0);  // draw outer border
+
+        // Draw vertical separator between world area and inspection area.
+        int sep_x = insp_start_x - 1;
+        if (sep_x > 1 && sep_x < max_x - 1) {
+            for (int y = 1; y < max_y - 1; ++y) {
+                mvaddch(y, sep_x, '|');
+            }
+        }
+
+        // Map physical coordinates to screen coordinates.
+        // Assume world roughly in [-50, 50] in both x and y.
+        double world_half = 50.0;
+        double scale_x = main_width  / (2.0 * world_half);
+        double scale_y = main_height / (2.0 * world_half);
+
+        int sx = (int)(cur_state.x * scale_x) + main_width / 2 + 1;
+        int sy = (int)(-cur_state.y * scale_y) + main_height / 2 + 1;
+
+        // Clamp drone visual position inside main area.
+        if (sx < 1) sx = 1;
+        if (sx > main_width) sx = main_width;
+        if (sy < 1) sy = 1;
+        if (sy > main_height) sy = main_height;
+
+        // Draw drone as a '+' character.
+        mvaddch(sy, sx, '+');
+
+
+        // ---------------- 6) Draw inspection info (right side) ----------------
+        int info_y = 2;
+        int info_x = insp_start_x + 1;
+
+        if (info_x < max_x - 1) {
+
+        // Print control hint on top.
+            mvprintw(info_y,     info_x,
+                 "Controls: w e r / s d f / x c v");
+            mvprintw(info_y + 1,     info_x + 8 ,
+            "(d = brake, q = quit)");
+            mvprintw(info_y + 2, info_x, "INSPECTION");
+            mvprintw(info_y + 4, info_x, "Last key: %c", last_key);
+            mvprintw(info_y + 6, info_x, "Fx = %.2f", cur_force.Fx);
+            mvprintw(info_y + 7, info_x, "Fy = %.2f", cur_force.Fy);
+            mvprintw(info_y + 9, info_x, "x  = %.2f", cur_state.x);
+            mvprintw(info_y + 10, info_x, "y  = %.2f", cur_state.y);
+            mvprintw(info_y + 11, info_x, "vx = %.2f", cur_state.vx);
+            mvprintw(info_y +12, info_x, "vy = %.2f", cur_state.vy);
+        }
+
+        // Push all drawings to the actual terminal.
+        refresh();
+    }
+
+    // ---------------- clean up ----------------
+    fclose(logfile);
+    endwin();  // restore terminal to normal mode
+
+    close(fd_kb);
+    close(fd_to_d);
+    close(fd_from_d);
+
+    exit(EXIT_SUCCESS);
+}

@@ -6,3 +6,11 @@ visc=1.0        # Viscous friction coefficient K
 dt=0.05         # Integration time step (seconds)
 force_step=5.0  # How much each key press changes the force
 world_half=50.0 # World range in both x and y: [-world_half, +world_half]
+
+# How much of being close should trigger the repulsion
+wall_clearance=10.0
+
+# if wall_gain is too small → drone leaks to edges gently, 
+# if too large → it bounces hard wall_gain=200.0
+# It basically tells us how aggressive is obstacle/wall repulsion
+wall_gain=200

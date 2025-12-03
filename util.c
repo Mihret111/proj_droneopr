@@ -3,6 +3,8 @@
 // ======================================================================
 
 #include "headers/util.h"
+#include "headers/messages.h" // for DroneStateMsg
+#include "headers/params.h"   // for SimParams
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,5 +46,118 @@ void direction_from_key(char key, double *dFx, double *dFy) {
         default:
             // any other key results in no directional change
             break;
+    }
+}
+
+// ----------------------------------------------------------------------
+// 8 discrete directions and vector helpers
+// ----------------------------------------------------------------------
+
+// 1/sqrt(2) for diagonals
+const double INV_SQRT2 = 0.7071067811865475;
+
+// Order is arbitrary but fixed; we also store the corresponding key.
+const Dir8 g_dir8[8] = {
+    { 'w', -INV_SQRT2, +INV_SQRT2 },  // up-left
+    { 'e',  0.0,        +1.0       }, // up
+    { 'r', +INV_SQRT2, +INV_SQRT2 },  // up-right
+    { 's', -1.0,        0.0       },  // left
+    { 'f', +1.0,        0.0       },  // right
+    { 'x', -INV_SQRT2, -INV_SQRT2 },  // down-left
+    { 'c',  0.0,        -1.0      },  // down
+    { 'v', +INV_SQRT2, -INV_SQRT2 }   // down-right
+};
+
+// Simple 2D dot product: (ax,ay) dot (bx,by)
+double dot2(double ax, double ay, double bx, double by) {
+    return ax * bx + ay * by;
+}
+
+// Given a vector (Px, Py), find the index (0..7) of the direction in
+// g_dir8 with largest positive dot product with (Px,Py).
+// If all dot products are <= 0, return -1.
+int best_dir8_for_vector(double Px, double Py) {
+    double best_dot = 0.0;
+    int    best_idx = -1;
+
+    for (int i = 0; i < 8; ++i) {
+        double dot = dot2(Px, Py, g_dir8[i].ux, g_dir8[i].uy);
+        if (dot > best_dot) {
+            best_dot = dot;
+            best_idx = i;
+        }
+    }
+    return best_idx;
+}
+
+// ----------------------------------------------------------------------
+// Wall repulsion field (Khatib-like) for the 4 borders.
+// ----------------------------------------------------------------------
+//
+// Walls are at x = ±world_half, y = ±world_half.
+// For each wall, if distance d < wall_clearance, we add a repulsive
+// magnitude ~ wall_gain * (1/d - 1/clearance) in the direction away
+// from the wall. Otherwise no contribution.
+// This is a simplified but consistent model with Latombe/Khatib-style
+// potential fields.
+//
+// Returned vector (Px,Py) is the sum of contributions from 4 walls.
+// ----------------------------------------------------------------------
+void compute_wall_repulsive_P(const DroneStateMsg *s,
+                              const SimParams    *params,
+                              double *Px, double *Py)
+{
+    double world_half     = params->world_half;
+    double wall_clearance = params->wall_clearance;
+    double wall_gain      = params->wall_gain;
+
+    *Px = 0.0;
+    *Py = 0.0;
+
+    if (wall_clearance <= 0.0 || wall_gain <= 0.0) {
+        // Repulsion disabled by parameters.
+        return;
+    }
+
+    const double eps = 1e-3; // to avoid division by zero
+
+    // ---- Right wall at x = +world_half ----
+    double d_right = world_half - s->x;  // distance from drone to right wall
+    if (d_right < wall_clearance) {
+        if (d_right < eps) d_right = eps;
+        double mag = wall_gain * (1.0/d_right - 1.0/wall_clearance);
+        if (mag < 0.0) mag = 0.0;
+        // Repulsive direction: push LEFT → (-1,0)
+        *Px -= mag;
+    }
+
+    // ---- Left wall at x = -world_half ----
+    double d_left = world_half + s->x;   // distance from drone to left wall
+    if (d_left < wall_clearance) {
+        if (d_left < eps) d_left = eps;
+        double mag = wall_gain * (1.0/d_left - 1.0/wall_clearance);
+        if (mag < 0.0) mag = 0.0;
+        // Repulsive direction: push RIGHT → (+1,0)
+        *Px += mag;
+    }
+
+    // ---- Top wall at y = +world_half ----
+    double d_top = world_half - s->y;
+    if (d_top < wall_clearance) {
+        if (d_top < eps) d_top = eps;
+        double mag = wall_gain * (1.0/d_top - 1.0/wall_clearance);
+        if (mag < 0.0) mag = 0.0;
+        // Repulsive direction: push DOWN → (0, -1)
+        *Py -= mag;
+    }
+
+    // ---- Bottom wall at y = -world_half ----
+    double d_bottom = world_half + s->y;
+    if (d_bottom < wall_clearance) {
+        if (d_bottom < eps) d_bottom = eps;
+        double mag = wall_gain * (1.0/d_bottom - 1.0/wall_clearance);
+        if (mag < 0.0) mag = 0.0;
+        // Repulsive direction: push UP → (0, +1)
+        *Py += mag;
     }
 }

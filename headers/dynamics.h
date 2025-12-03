@@ -1,7 +1,7 @@
 // dynamics.h
-// ======================================================================
 // Interface for the dynamics process (D).
 // ======================================================================
+#define _POSIX_C_SOURCE 199309L  // to solve the nanosleep warning tells the headers to expose the POSIX nanosleep prototype
 
 #ifndef DYNAMICS_H
 #define DYNAMICS_H

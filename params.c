@@ -46,8 +46,8 @@ void init_default_params(SimParams *p) {
     p->world_half = 50.0;
 
     // unused now, but ready for walls
-    p->wall_clearance = 10.0;
-    p->wall_gain      = 200.0;
+    p->wall_clearance = 5.0;
+    p->wall_gain      = 0.1;
 }
 
 // Load parameters from a simple "key=value" file.

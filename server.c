@@ -19,6 +19,115 @@
 #include <stdbool.h>
 
 #include <sys/select.h>   // for fd_set, FD_ZERO, FD_SET, select()
+#include <math.h>  // for sqrt, to be used in key mapping instead of hard code, REP
+
+//function to map wall repulsion to a virtual key
+
+// ----------------------------------------------------------------------
+// Given the current state and parameters, compute the total wall
+// repulsive vector P (using util.c), project it onto the 8 directions,
+// choose the direction with maximum positive projection, and interpret
+// that as a "virtual key" that pushes the drone away from the walls.
+//
+// If a significant repulsion is found, this function:
+//   - updates cur_force (vectorially, like a key)
+//   - sends cur_force to D via fd_to_d
+//   - logs the event to logfile.
+//
+// If no significant repulsion is needed, it does nothing.
+// ----------------------------------------------------------------------
+// ----------------------------------------------------------------------
+// WALL REPULSION via "virtual key" *without* accumulating into cur_force.
+//
+// cur_force   = persistent user force (from real keys).
+// cur_state   = current drone state from D.
+// params      = simulation + wall params.
+// fd_to_d     = pipe to D.
+// logfile     = for debug logging.
+// paused      = if true, we don't apply automatic corrections.
+//
+// We compute P from the 4 walls, project it onto the 8 directions,
+// choose the best direction, build a *temporary* repulsive contribution
+// F_rep, and send (cur_force + F_rep) to D.
+// cur_force itself is NOT modified, so repulsion does not explode over time.
+// ----------------------------------------------------------------------
+static void apply_wall_repulsion_virtual_key(ForceStateMsg       *cur_force,
+                                             const DroneStateMsg *cur_state,
+                                             const SimParams     *params,
+                                             int                  fd_to_d,
+                                             FILE                *logfile,
+                                             bool                 paused)
+{
+    if (paused) {
+        // When paused, do not do any automatic wall corrections.
+        return;
+    }
+
+    // 1) Compute continuous repulsive vector P from the four walls.
+    double Px = 0.0, Py = 0.0;
+    compute_wall_repulsive_P(cur_state, params, &Px, &Py);
+
+    // If P is very small, no need to do anything special.
+    double Pnorm2 = Px*Px + Py*Py;
+    if (Pnorm2 < 1e-6) {
+        return;
+    }
+
+    // 2) Find which of the 8 discrete directions best matches P.
+    int idx = best_dir8_for_vector(Px, Py);
+    if (idx < 0) {
+        // No direction with positive projection => skip.
+        return;
+    }
+
+    char   best_key = g_dir8[idx].key;
+    double best_dot = dot2(Px, Py, g_dir8[idx].ux, g_dir8[idx].uy);
+
+    if (best_dot <= 0.0) {
+        return;
+    }
+
+    // 3) Convert best_dot (a continuous magnitude) into a "virtual key"
+    //    contribution. Important difference vs before:
+    //    we DO NOT add it into cur_force; we just build a temporary F_rep.
+    double step_force = params->force_step;
+
+    // Approximate how many key steps would correspond to best_dot.
+    double n_steps_f = best_dot / (step_force + 1e-9);
+
+    // Round and clamp to keep repulsion moderate (no explosions).
+    int n_steps = (int)(n_steps_f + 0.5);
+    if (n_steps < 1) n_steps = 1;
+    if (n_steps > 2) n_steps = 2;   // smaller than before to reduce bouncing
+
+    // 4) Convert chosen key to unit direction (dFx, dFy).
+    double dFx, dFy;
+    direction_from_key(best_key, &dFx, &dFy);
+
+    // Build repulsive force vector F_rep (NOT stored in cur_force).
+    double Frep_x = n_steps * dFx * step_force;
+    double Frep_y = n_steps * dFy * step_force;
+
+    // 5) Construct the total force to send: user force + repulsive force.
+    ForceStateMsg out = *cur_force;  // copy the persistent user force
+    out.Fx += Frep_x;
+    out.Fy += Frep_y;
+    out.reset = 0;
+
+    // 6) Send this total force to D.
+    if (write(fd_to_d, &out, sizeof(out)) == -1) {
+        perror("[B] write to D failed (wall repulsion)");
+    } else if (logfile) {
+        fprintf(logfile,
+                "WALL_REPULSION: P=(%.2f,%.2f), best_key=%c, n_steps=%d, "
+                "Frep=(%.2f,%.2f), outFx=%.2f outFy=%.2f\n",
+                Px, Py, best_key, n_steps,
+                Frep_x, Frep_y, out.Fx, out.Fy);
+        fflush(logfile);
+    }
+}
+
+
 
 
 void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, SimParams params) {
@@ -78,10 +187,10 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, SimParams params)
         }
 
         // Right inspection panel width
-        int insp_width = 35;
+        int insp_width = 15;               // was 35
         if (max_x < insp_width + 10) {
-            insp_width = max_x / 3;
-            if (insp_width < 20) insp_width = 20;
+            insp_width = max_x / 4;
+            if (insp_width < 10) insp_width = 10;
         }
         int insp_start_x = max_x - insp_width;
         if (insp_start_x < 1) insp_start_x = 1;
@@ -248,6 +357,19 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, SimParams params)
             fflush(logfile);
         }
 
+        // ------------------------------------------------------------------
+        // 4.5) Apply wall repulsion as a virtual key (assignment-style).
+        //      This uses the current state and params to compute a repulsive
+        //      vector P from the walls, then projects it onto the 8 key
+        //      directions and applies a "virtual key" to cur_force.
+        // ------------------------------------------------------------------
+/*         apply_wall_repulsion_virtual_key(&cur_force,
+                                         &cur_state,
+                                         &params,
+                                         fd_to_d,
+                                         logfile,
+                                         paused);
+ */
         // ------------------------------------------------------------------
         // 5) Draw UI (world + inspection panel).
         // ------------------------------------------------------------------

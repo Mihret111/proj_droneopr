@@ -351,25 +351,26 @@ static int target_too_close_to_wall(double x,
     return 0;
 }
 
-// Check if (x,y) is too close to any active obstacle.
-static int target_too_close_to_obstacles(double x,
-                                         double y,
-                                         const Obstacle *obs,
-                                         int num_obs,
-                                         double min_dist)
+// Check if (x,y)of a target/obstacle is too close to any active obstacle/ target.. casted to the point-like struct for refactoring
+int too_close_to_any_pointlike(double px,
+                               double py,
+                               const PointLike *arr,
+                               int count,
+                               double min_dist)
 {
-    double min_dist2 = min_dist * min_dist;
+    double min_d2 = min_dist * min_dist;
 
-    for (int i = 0; i < num_obs; ++i) {
-        if (!obs[i].active) continue;
+    for (int i = 0; i < count; ++i) {
+        if (!arr[i].active)
+            continue;
 
-        double dx = x - obs[i].x;
-        double dy = y - obs[i].y;
-        double d2 = dx*dx + dy*dy;
+        double dx = px - arr[i].x;
+        double dy = py - arr[i].y;
 
-        if (d2 < min_dist2) {
+        if (dx*dx + dy*dy <= min_d2)
             return 1;
-        }
     }
     return 0;
 }
+
+

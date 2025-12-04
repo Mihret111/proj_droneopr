@@ -54,7 +54,8 @@ void run_obstacle_process(int write_fd, SimParams params) {
         //  2) is at least min_spacing away from previously generated obstacles
         for (int i = 0; i < msg.count; ++i) {
             int attempts = 0;
-            int placed   = 0;while (attempts < max_attempts) {
+            int placed   = 0;
+            while (attempts < max_attempts) {
                 attempts++;
 
                 // 1) Sample inside inner box: [-world_half+margin, +world_half-margin]

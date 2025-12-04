@@ -642,29 +642,52 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
                     fprintf(logfile,
                             "[B] Received obstacle set but PAUSED -> ignored.\n");
                     fflush(logfile);
-                }
-                else{
-                    int count = msg.count;
-                    if (count > NUM_OBSTACLES) count = NUM_OBSTACLES;
+                } else {
+                    int requested = msg.count;
+                    if (requested > NUM_OBSTACLES) requested = NUM_OBSTACLES;
 
-                    // Overwrite our current obstacles with the new set
-                    for (int i = 0; i < count; ++i) {
-                        g_obstacles[i].x          = msg.obs[i].x;
-                        g_obstacles[i].y          = msg.obs[i].y;
-                        g_obstacles[i].life_steps = msg.obs[i].life_steps;
-                        g_obstacles[i].active     = 1;
+                    // Use a clearance similar to what we used for targets
+                    double tgt_clearance = params.world_half * 0.15;
+
+                    int accepted = 0;
+
+                    for (int i = 0; i < requested; ++i) {
+                        double x = msg.obs[i].x;
+                        double y = msg.obs[i].y;
+
+                        // Reject if too close to any active target
+                        if (too_close_to_any_pointlike(x, y,
+                               (PointLike*)g_obstacles,
+                               NUM_OBSTACLES,
+                               obs_clearance)){
+                            fprintf(logfile,
+                                    "[B] Obstacle (%.2f, %.2f) rejected: too close to target.\n",
+                                    x, y);
+                            continue;
+                        }
+
+                        // If accepted index is within our capacity, store it
+                        if (accepted < NUM_OBSTACLES) {
+                            g_obstacles[accepted].x          = x;
+                            g_obstacles[accepted].y          = y;
+                            g_obstacles[accepted].life_steps = msg.obs[i].life_steps;
+                            g_obstacles[accepted].active     = 1;
+                            accepted++;
+                        }
                     }
-                    // Deactivate any remaining slots
-                    for (int i = count; i < NUM_OBSTACLES; ++i) {
+
+                    // Deactivate remaining slots
+                    for (int i = accepted; i < NUM_OBSTACLES; ++i) {
                         g_obstacles[i].active     = 0;
                         g_obstacles[i].life_steps = 0;
                     }
 
                     fprintf(logfile,
-                            "[B] Received %d obstacles from O.\n",
-                            count);
+                            "[B] Accepted %d obstacles (requested %d).\n",
+                            accepted, requested);
                     fflush(logfile);
                 }
+
             }
         }
 
@@ -706,9 +729,10 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
                 }
 
                 // 2) reject if too close to obstacles
-                if (target_too_close_to_obstacles(x, y,
-                                                  g_obstacles, NUM_OBSTACLES,
-                                                  obs_clearance)) {
+                if (too_close_to_any_pointlike(x, y,
+                               (PointLike*)g_targets,
+                               NUM_TARGETS,
+                               tgt_clearance)){
                     fprintf(logfile,
                             "[B] Target (%.2f,%.2f) rejected: too close to obstacles.\n",
                             x, y);

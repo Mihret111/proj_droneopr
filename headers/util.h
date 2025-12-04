@@ -29,6 +29,13 @@ typedef struct {
     double uy;   // unit vector y-component
 } Dir8;
 
+// Any object with x, y, active : to be treated as PointLike for latter calculated distance b/n the pointLikes
+typedef struct {
+    double x;
+    double y;
+    int    active;
+} PointLike;
+
 
 // Normalization factor for diagonals: 1/sqrt(2).
 extern const double INV_SQRT2;
@@ -113,11 +120,11 @@ static int target_too_close_to_wall(double x,
                                     double y,
                                     const SimParams *params,
                                     double wall_margin);
-// Check if (x,y) is too close to any active obstacle.
-static int target_too_close_to_obstacles(double x,
-                                         double y,
-                                         const Obstacle *obs,
-                                         int num_obs,
-                                         double min_dist);
 
+// Check if (x,y) is too close to any active obstacle.
+int too_close_to_any_pointlike(double px,
+                               double py,
+                               const PointLike *arr,
+                               int count,
+                               double min_dist);
 #endif // UTIL_H

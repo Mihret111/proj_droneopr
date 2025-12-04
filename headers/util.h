@@ -4,8 +4,13 @@
 
 #ifndef UTIL_H
 #define UTIL_H
+
 #include "messages.h" // for DroneStateMsg
 #include "params.h"   // for SimParams
+#include <stdbool.h>
+#include "obstacles.h"   // add this near the top (after guards)
+
+
 
 // Print error message (with errno) and exit.
 void die(const char *msg);
@@ -76,6 +81,38 @@ void compute_wall_repulsive_P(const DroneStateMsg *s,
 
 // Find best 8-direction index
 int best_dir8_for_vector(double Px, double Py); */
+
+
+// ...
+
+// Unified repulsive field:
+//   - can include walls (geo-fence)
+//   - can include point obstacles
+//
+// include_walls      : if true, add wall repulsion
+// include_obstacles  : if true, add obstacle repulsion
+//
+// obs / num_obs      : obstacle list (ignored if include_obstacles == false)
+void compute_repulsive_P(const DroneStateMsg *s,
+                         const SimParams     *params,
+                         const Obstacle      *obs,
+                         int                  num_obs,
+                         bool                 include_walls,
+                         bool                 include_obstacles,
+                         double              *Px,
+                         double              *Py);
+
+// Convenience wrappers (so your old code keeps compiling)
+void compute_wall_repulsive_P(const DroneStateMsg *s,
+                              const SimParams    *params,
+                              double *Px, double *Py);
+
+void compute_obstacles_repulsive_P(const DroneStateMsg *s,
+                                   const SimParams     *params,
+                                   const Obstacle      *obs,
+                                   int                  num_obs,
+                                   double              *Px,
+                                   double              *Py);
 
 
 #endif // UTIL_H

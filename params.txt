@@ -13,4 +13,4 @@ wall_clearance=5.0        // beyond this distance the obstacle is not perceived
 # if wall_gain is too small → drone leaks to edges gently, 
 # if too large → it bounces hard wall_gain=200.0
 # It basically tells us how aggressive is obstacle/wall repulsion
-wall_gain=10
+wall_gain=100

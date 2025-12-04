@@ -5,6 +5,10 @@
 #include "headers/util.h"
 #include "headers/messages.h" // for DroneStateMsg
 #include "headers/params.h"   // for SimParams
+#include "headers/obstacles.h"
+
+#include <math.h>
+#include <stdbool.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,61 +107,253 @@ int best_dir8_for_vector(double Px, double Py) {
 //
 // Returned vector (Px,Py) is the sum of contributions from 4 walls.
 // ----------------------------------------------------------------------
-void compute_wall_repulsive_P(const DroneStateMsg *s,
-                              const SimParams    *params,
-                              double *Px, double *Py)
+// ----------------------------------------------------------------------
+// Unified Khatib-style repulsive field from walls AND/OR obstacles.
+//
+// - Walls:
+//     x = ±world_half, y = ±world_half
+//     clearance = params->wall_clearance
+//     gain      = params->wall_gain
+//
+// - Obstacles: radial field from each point obstacle.
+//
+// You can enable/disable each contribution with include_walls,
+// include_obstacles flags.
+// ----------------------------------------------------------------------
+void compute_repulsive_P(const DroneStateMsg *s,
+                         const SimParams     *params,
+                         const Obstacle      *obs,
+                         int                  num_obs,
+                         bool                 include_walls,
+                         bool                 include_obstacles,
+                         double              *Px,
+                         double              *Py)
 {
-    double world_half     = params->world_half;
-    double wall_clearance = params->wall_clearance;
-    double wall_gain      = params->wall_gain;
+    const double eps = 1e-3;
 
     *Px = 0.0;
     *Py = 0.0;
 
-    if (wall_clearance <= 0.0 || wall_gain <= 0.0) {
+    // -------------------- WALL REPULSION --------------------
+    if (include_walls) {
+        double world_half     = params->world_half;
+        double wall_clearance = params->wall_clearance;
+        double wall_gain      = params->wall_gain;
+
+        if (wall_clearance > 0.0 && wall_gain > 0.0) {
+            // Right wall at x = +world_half
+            double d_right = world_half - s->x;
+            if (d_right < wall_clearance) {
+                if (d_right < eps) d_right = eps;
+                double mag = wall_gain * (1.0/d_right - 1.0/wall_clearance);
+                if (mag < 0.0) mag = 0.0;
+                // Push left
+                *Px -= mag; // py=0 here 
+            }
+
+            // Left wall at x = -world_half
+            double d_left = world_half + s->x;
+            if (d_left < wall_clearance) {
+                if (d_left < eps) d_left = eps;
+                double mag = wall_gain * (1.0/d_left - 1.0/wall_clearance);
+                if (mag < 0.0) mag = 0.0;
+                // Push right
+                *Px += mag;
+            }
+
+            // Top wall at y = +world_half
+            double d_top = world_half - s->y;
+            if (d_top < wall_clearance) {
+                if (d_top < eps) d_top = eps;
+                double mag = wall_gain * (1.0/d_top - 1.0/wall_clearance);
+                if (mag < 0.0) mag = 0.0;
+                // Push down
+                *Py -= mag;
+            }
+
+            // Bottom wall at y = -world_half
+            double d_bottom = world_half + s->y;
+            if (d_bottom < wall_clearance) {
+                if (d_bottom < eps) d_bottom = eps;
+                double mag = wall_gain * (1.0/d_bottom - 1.0/wall_clearance);
+                if (mag < 0.0) mag = 0.0;
+                // Push up
+                *Py += mag;
+            }
+        }
+    }
+
+    // ------------------ OBSTACLE REPULSION -------------------
+    if (include_obstacles && obs && num_obs > 0) {
+        // For now we use fixed obstacle params derived from world size.
+        // If you want, you can later add obs_clearance/obs_gain into SimParams.
+         const double obs_clearance = params->world_half * 0.35;
+        const double obs_gain      = 120.0;   // you said 120 behaved well
+        //const double obs_clearance = params->wall_clearance;
+        //const double obs_gain      = params-> wall_gain;
+        if (obs_clearance <= 0.0 || obs_gain <= 0.0) {
+            return;
+        }
+
+        for (int k = 0; k < num_obs; ++k) {
+            double ox = obs[k].x;
+            double oy = obs[k].y;
+
+            double dx  = s->x - ox;
+            double dy  = s->y - oy;
+            double rho = sqrt(dx*dx + dy*dy);
+
+            if (rho < eps) {
+                rho = eps;
+            }
+
+            if (rho < obs_clearance) {
+                double mag = obs_gain * (1.0/rho - 1.0/obs_clearance);
+                if (mag < 0.0) mag = 0.0;
+
+                double ux = dx / rho;
+                double uy = dy / rho;
+
+                *Px += mag * ux;
+                *Py += mag * uy;
+            }
+        }
+    }
+}
+
+// Walls-only wrapper (what D currently uses)
+void compute_wall_repulsive_P(const DroneStateMsg *s,
+                              const SimParams    *params,
+                              double *Px, double *Py)
+{
+    compute_repulsive_P(s, params,
+                        NULL,      // no obstacles
+                        0,
+                        true,      // include_walls
+                        false,     // include_obstacles
+                        Px, Py);
+}
+
+// Obstacles-only wrapper (what B uses for virtual-key logic)
+void compute_obstacles_repulsive_P(const DroneStateMsg *s,
+                                   const SimParams     *params,
+                                   const Obstacle      *obs,
+                                   int                  num_obs,
+                                   double              *Px,
+                                   double              *Py)
+{
+    compute_repulsive_P(s, params,
+                        obs,
+                        num_obs,
+                        false,     // include_walls
+                        true,      // include_obstacles
+                        Px, Py);
+}
+
+//A unified function: for repulsive forces
+
+
+
+/* 
+/* 
+
+void compute_repulsive_P(const DroneStateMsg *s,
+                              const SimParams    *params,
+                              const Obstacle      *obs,
+                              int                  num_obs,
+                              double *Px, double *Py)
+{
+    double world_half     = params->world_half;
+    double clearance = params->wall_clearance;
+    double gain      = params->wall_gain;
+    const double eps = 1e-3; // to avoid division by zero
+
+    *Px = 0.0;
+    *Py = 0.0;
+
+    double Rho=0;
+    // used for test, if obs had no repulsive power
+    if (clearance <= 0.0 || gain <= 0.0) {
         // Repulsion disabled by parameters.
         return;
     }
 
-    const double eps = 1e-3; // to avoid division by zero
+    if (obs == NULL) {
+        // ---- Right wall at x = +world_half ----
+        Rho = world_half - s->x;  // distance from drone to right wall
+        if (Rho< clearance) {
+            if (d_right < eps) d_right = eps{
+                ux=1;
+                uy= 0;}
 
-    // ---- Right wall at x = +world_half ----
-    double d_right = world_half - s->x;  // distance from drone to right wall
-    if (d_right < wall_clearance) {
-        if (d_right < eps) d_right = eps;
-        double mag = wall_gain * (1.0/d_right - 1.0/wall_clearance);
-        if (mag < 0.0) mag = 0.0;
-        // Repulsive direction: push LEFT → (-1,0)
-        *Px -= mag;
+ /*            double mag = gain * (1.0/d_right - 1.0/clearance);
+            if (mag < 0.0) mag = 0.0;
+            // Repulsive direction: push LEFT → (-1,0)
+            *Px -= mag; */
+/*         }
+
+        // ---- Left wall at x = -world_half ----
+        double d_left = world_half + s->x;   // distance from drone to left wall
+        elif (d_left < wall_clearance) {
+            if (d_left < eps) d_left = eps;
+            double mag = wall_gain * (1.0/d_left - 1.0/wall_clearance);
+            if (mag < 0.0) mag = 0.0;
+            // Repulsive direction: push RIGHT → (+1,0)
+            *Px += mag;
+        }
+
+        // ---- Top wall at y = +world_half ----
+        double d_top = world_half - s->y;
+        if (d_top < wall_clearance) {
+            if (d_top < eps) d_top = eps;
+            double mag = wall_gain * (1.0/d_top - 1.0/wall_clearance);
+            if (mag < 0.0) mag = 0.0;
+            // Repulsive direction: push DOWN → (0, -1)
+            *Py -= mag;
+        }
+
+        // ---- Bottom wall at y = -world_half ----
+        double d_bottom = world_half + s->y;
+        if (d_bottom < wall_clearance) {
+            if (d_bottom < eps) d_bottom = eps;
+            double mag = wall_gain * (1.0/d_bottom - 1.0/wall_clearance);
+            if (mag < 0.0) mag = 0.0;
+            // Repulsive direction: push UP → (0, +1)
+            *Py += mag;
+        }
+    }
+    else {
+
+        for (int k = 0; k < num_obs; ++k) {
+            double ox = obs[k].x;
+            double oy = obs[k].y;
+
+            double dx  = s->x - ox;
+            double dy  = s->y - oy;
+            double rho = sqrt(dx*dx + dy*dy);   // here calc how close the drone has become
+                   // ?? confirm this too
+        if (rho < eps) {
+            // On top of the obstacle: push strongly in some direction
+            rho = eps;
+        }
+
+        if (rho < obs_clearance) {
+            double mag = obs_gain * (1.0/rho - 1.0/obs_clearance);  // khatib
+            if (mag < 0.0) mag = 0.0;
+
+            double ux = dx / rho;  // unit vector away from obstacle
+            double uy = dy / rho;
+
+            // actual ux uy has to be aligned to the 8 lines and changed to a virtual key whose
+            // magniture will later be multiplied with the Fx, Fy retrieved from the key mapping
+            // ux, uy dotted withe the eight lines:
+            
+            // TODO: see which direction better alligns with the shorter Rho to obstacle
+            // retrieve Fx and Fy as per that, then 
+            *Px += mag * ux;
+            *Py += mag * uy;
+        }
+
     }
 
-    // ---- Left wall at x = -world_half ----
-    double d_left = world_half + s->x;   // distance from drone to left wall
-    if (d_left < wall_clearance) {
-        if (d_left < eps) d_left = eps;
-        double mag = wall_gain * (1.0/d_left - 1.0/wall_clearance);
-        if (mag < 0.0) mag = 0.0;
-        // Repulsive direction: push RIGHT → (+1,0)
-        *Px += mag;
-    }
-
-    // ---- Top wall at y = +world_half ----
-    double d_top = world_half - s->y;
-    if (d_top < wall_clearance) {
-        if (d_top < eps) d_top = eps;
-        double mag = wall_gain * (1.0/d_top - 1.0/wall_clearance);
-        if (mag < 0.0) mag = 0.0;
-        // Repulsive direction: push DOWN → (0, -1)
-        *Py -= mag;
-    }
-
-    // ---- Bottom wall at y = -world_half ----
-    double d_bottom = world_half + s->y;
-    if (d_bottom < wall_clearance) {
-        if (d_bottom < eps) d_bottom = eps;
-        double mag = wall_gain * (1.0/d_bottom - 1.0/wall_clearance);
-        if (mag < 0.0) mag = 0.0;
-        // Repulsive direction: push UP → (0, +1)
-        *Py += mag;
-    }
-}
+} */

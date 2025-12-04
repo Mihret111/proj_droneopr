@@ -23,10 +23,7 @@
 
 #define NUM_OBSTACLES 8
 
-typedef struct {
-    double x;   // world x coordinate
-    double y;   // world y coordinate
-} Obstacle;
+#include "headers/obstacles.h"
 
 // Global / static array of 8 obstacles
 static Obstacle g_obstacles[NUM_OBSTACLES];
@@ -47,7 +44,7 @@ static Obstacle g_obstacles[NUM_OBSTACLES];
 // Here we just choose some reasonable obs_clearance and obs_gain.
 // Later you can move these into params.txt if you want.
 // ----------------------------------------------------------------------
-static void compute_obstacles_repulsive_P(const DroneStateMsg *s,
+/* static void compute_obstacles_repulsive_P(const DroneStateMsg *s,
                                           const SimParams     *params,
                                           const Obstacle      *obs,
                                           int                  num_obs,
@@ -100,7 +97,7 @@ static void compute_obstacles_repulsive_P(const DroneStateMsg *s,
             *Py += mag * uy;
         }
     }
-}
+} */
 
 // another helper
 
@@ -108,6 +105,30 @@ static void compute_obstacles_repulsive_P(const DroneStateMsg *s,
 // Send total force to D:
 //   F_total = user_force (cur_force) + obstacles repulsion (P_obs).
 // Walls repulsion is still computed in D.
+// ----------------------------------------------------------------------
+
+// ----------------------------------------------------------------------
+// Send total force to D using a "virtual key" computed from
+// the unified repulsive field (walls + obstacles).
+//
+// user_force  = persistent user force from keys (cur_force).
+// cur_state   = latest drone state from D.
+// params      = simulation params (mass, visc, force_step, world_half,
+//               wall_clearance, wall_gain, etc.).
+// obs         = array of obstacles in world coords.
+// num_obs     = number of obstacles (8).
+// fd_to_d     = pipe to dynamics process.
+// logfile     = log file for debugging.
+// reason      = small string saying why we are sending (e.g. "key", "state").
+//
+// Steps:
+//   1. compute_repulsive_P(..., include_walls=true, include_obstacles=true)
+//   2. project P onto 8 discrete directions (g_dir8).
+//   3. choose best positive dot -> virtual key direction.
+//   4. map magnitude to 1..N key steps.
+//   5. build F_vk from best_key, n_steps, force_step.
+//   6. out = user_force + F_vk, send to D.
+//   7. IMPORTANT: user_force is NOT modified.
 // ----------------------------------------------------------------------
 static void send_total_force_to_d(const ForceStateMsg *user_force,
                                   const DroneStateMsg *cur_state,
@@ -118,19 +139,26 @@ static void send_total_force_to_d(const ForceStateMsg *user_force,
                                   FILE                *logfile,
                                   const char          *reason)
 {
-    double Pox = 0.0, Poy = 0.0;
-        compute_obstacles_repulsive_P(cur_state, params, obs, num_obs, &Pox, &Poy);
+    // 1) Unified continuous repulsive vector from walls + obstacles
+    double Px = 0.0, Py = 0.0;
+    compute_repulsive_P(cur_state,
+                        params,
+                        obs,
+                        num_obs,
+                        true,   // include_walls
+                        true,   // include_obstacles
+                        &Px, &Py);
 
-    // If very small, no obstacle contribution; just send user force.
-    double Pnorm2 = Pox*Pox + Poy*Poy;
+    // If very small, just send user_force alone.
+    double Pnorm2 = Px*Px + Py*Py;
     if (Pnorm2 < 1e-6) {
         ForceStateMsg out = *user_force;
         if (write(fd_to_d, &out, sizeof(out)) == -1) {
-            perror("[B] write to D failed (no obs rep)");
+            perror("[B] write to D failed (no rep)");
         } else if (logfile) {
             fprintf(logfile,
                     "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
-                    "Pobs ~ 0 -> Fx=%.2f Fy=%.2f\n",
+                    "P ~ 0 -> Fx=%.2f Fy=%.2f\n",
                     reason ? reason : "?",
                     user_force->Fx, user_force->Fy,
                     out.Fx, out.Fy);
@@ -139,21 +167,20 @@ static void send_total_force_to_d(const ForceStateMsg *user_force,
         return;
     }
 
-    // 2) Find discrete direction that best matches P_obs
-    int idx = best_dir8_for_vector(Pox, Poy);  // uses dot2 & g_dir8 from util.c
+    // 2) Find discrete direction that best matches P
+    int idx = best_dir8_for_vector(Px, Py);  // util.c
     if (idx < 0) {
-        // P points opposite of all discrete directions (numerical corner case).
-        // Just use user force alone.
+        // No good direction -> fallback to user only
         ForceStateMsg out = *user_force;
         if (write(fd_to_d, &out, sizeof(out)) == -1) {
             perror("[B] write to D failed (no good dir)");
         } else if (logfile) {
             fprintf(logfile,
                     "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
-                    "Pobs=(%.2f,%.2f), no good dir -> Fx=%.2f Fy=%.2f\n",
+                    "P=(%.2f,%.2f), no good dir -> Fx=%.2f Fy=%.2f\n",
                     reason ? reason : "?",
                     user_force->Fx, user_force->Fy,
-                    Pox, Poy,
+                    Px, Py,
                     out.Fx, out.Fy);
             fflush(logfile);
         }
@@ -161,61 +188,57 @@ static void send_total_force_to_d(const ForceStateMsg *user_force,
     }
 
     char   best_key = g_dir8[idx].key;
-    double best_dot = dot2(Pox, Poy, g_dir8[idx].ux, g_dir8[idx].uy);
+    double best_dot = dot2(Px, Py, g_dir8[idx].ux, g_dir8[idx].uy);
 
     if (best_dot <= 0.0) {
-        // No helpful positive direction found
+        // Same: fallback if projection is not positive
         ForceStateMsg out = *user_force;
         if (write(fd_to_d, &out, sizeof(out)) == -1) {
-            perror("[B] write to D failed (non-positive best_dot)");
+            perror("[B] write to D failed (best_dot<=0)");
         } else if (logfile) {
             fprintf(logfile,
                     "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
-                    "Pobs=(%.2f,%.2f), best_dot<=0 -> Fx=%.2f Fy=%.2f\n",
+                    "P=(%.2f,%.2f), best_dot<=0 -> Fx=%.2f Fy=%.2f\n",
                     reason ? reason : "?",
                     user_force->Fx, user_force->Fy,
-                    Pox, Poy,
+                    Px, Py,
                     out.Fx, out.Fy);
             fflush(logfile);
         }
         return;
     }
 
-    // 3) Convert best_dot into a small number of key steps.
+    // 3) Convert best_dot into key steps
     double step_force = params->force_step;
+    double n_steps_f  = best_dot / (step_force + 1e-9);
 
-    // How many steps would give a similar projection magnitude?
-    double n_steps_f = best_dot / (step_force + 1e-9);
-
-    // We round and clamp to avoid crazy big forces.
     int n_steps = (int)(n_steps_f + 0.5);
 /*     if (n_steps < 1) n_steps = 1;
-    if (n_steps > 2) n_steps = 2; */  // keep obstacle push modest
+    if (n_steps > 3) n_steps = 3;   */// you can tune this; 3–4 is usually safe
 
-    // 4) Convert the chosen key into a direction (dFx,dFy).
+    // 4) Get direction from key
     double dFx, dFy;
     direction_from_key(best_key, &dFx, &dFy);
 
-    // Virtual-key repulsive force
     double Fvk_x = n_steps * dFx * step_force;
     double Fvk_y = n_steps * dFy * step_force;
 
-    // 5) Combine user + virtual repulsive key into the final out message.
+    // 5) Combine user + virtual-key repulsion
     ForceStateMsg out = *user_force;
     out.Fx += Fvk_x;
     out.Fy += Fvk_y;
 
     // 6) Send to D
     if (write(fd_to_d, &out, sizeof(out)) == -1) {
-        perror("[B] write to D failed (obs virtual key)");
+        perror("[B] write to D failed (virtual key rep)");
     } else if (logfile) {
         fprintf(logfile,
                 "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
-                "Pobs=(%.2f,%.2f), best_key=%c, n_steps=%d "
+                "P=(%.2f,%.2f), best_key=%c, n_steps=%d "
                 "Fvk=(%.2f,%.2f) => Fx=%.2f Fy=%.2f\n",
                 reason ? reason : "?",
                 user_force->Fx, user_force->Fy,
-                Pox, Poy,
+                Px, Py,
                 best_key, n_steps,
                 Fvk_x, Fvk_y,
                 out.Fx, out.Fy);
@@ -436,6 +459,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, SimParams params)
         int main_width = insp_start_x - 2;
         if (main_width < 10) main_width = 10;
 
+        // nedded to plot the colored items
         initscr();
         start_color();
 
@@ -448,10 +472,10 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, SimParams params)
 
         // Define a custom orange color
         // RGB scaled 0–1000 in ncurses
-        init_color(COLOR_YELLOW, 1000, 500, 0);   // Strong orange (R=1000, G=500, B=0)
-
-        // Assign color-pair ID 1: ORANGE foreground, BLACK background
+        init_color(COLOR_YELLOW, 1000, 500, 0);   // For obs: Strong orange (R=1000, G=500, B=0)
+        // Assign color-pair IDs 1 and 2: ORANGE foreground, BLACK background
         init_pair(1, COLOR_YELLOW, COLOR_BLACK);
+       
         // ------------------------------------------------------------------
         // 2) Use select() to wait for data from keyboard and dynamics.
         //    Also handle EINTR (e.g., from SIGWINCH on resize).
@@ -699,7 +723,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, SimParams params)
             if (ox > main_width) ox = main_width;
             if (oy < world_top) oy = world_top;
             if (oy > world_bottom) oy = world_bottom;
-
+            
             mvaddch(oy, ox, 'o');  // TODO: add color to make them orange
             
             attroff(COLOR_PAIR(1));

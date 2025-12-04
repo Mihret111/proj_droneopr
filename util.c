@@ -130,7 +130,7 @@ void compute_repulsive_P(const DroneStateMsg *s,
                          double              *Py)
 {
     const double eps = 1e-3;
-
+    include_walls = false;
     *Px = 0.0;
     *Py = 0.0;
 
@@ -221,7 +221,7 @@ void compute_repulsive_P(const DroneStateMsg *s,
     }
 }
 
-// Walls-only wrapper (what D currently uses)
+/* // Walls-only wrapper (what D currently uses)
 void compute_wall_repulsive_P(const DroneStateMsg *s,
                               const SimParams    *params,
                               double *Px, double *Py)
@@ -232,7 +232,7 @@ void compute_wall_repulsive_P(const DroneStateMsg *s,
                         true,      // include_walls
                         false,     // include_obstacles
                         Px, Py);
-}
+} */
 
 // Obstacles-only wrapper (what B uses for virtual-key logic)
 void compute_obstacles_repulsive_P(const DroneStateMsg *s,
@@ -253,107 +253,74 @@ void compute_obstacles_repulsive_P(const DroneStateMsg *s,
 //A unified function: for repulsive forces
 
 
-
-/* 
-/* 
-
-void compute_repulsive_P(const DroneStateMsg *s,
+// ----------------------------------------------------------------------
+// Wall repulsion field (Khatib-like) for the 4 borders.
+// ----------------------------------------------------------------------
+//
+// Walls are at x = ±world_half, y = ±world_half.
+// For each wall, if distance d < wall_clearance, we add a repulsive
+// magnitude ~ wall_gain * (1/d - 1/clearance) in the direction away
+// from the wall. Otherwise no contribution.
+// This is a simplified but consistent model with Latombe/Khatib-style
+// potential fields.
+//
+// Returned vector (Px,Py) is the sum of contributions from 4 walls.
+// ----------------------------------------------------------------------
+void compute_wall_repulsive_P(const DroneStateMsg *s,
                               const SimParams    *params,
-                              const Obstacle      *obs,
-                              int                  num_obs,
                               double *Px, double *Py)
 {
     double world_half     = params->world_half;
-    double clearance = params->wall_clearance;
-    double gain      = params->wall_gain;
-    const double eps = 1e-3; // to avoid division by zero
+    double wall_clearance = params->wall_clearance;
+    double wall_gain      = params->wall_gain;
 
     *Px = 0.0;
     *Py = 0.0;
 
-    double Rho=0;
-    // used for test, if obs had no repulsive power
-    if (clearance <= 0.0 || gain <= 0.0) {
+    if (wall_clearance <= 0.0 || wall_gain <= 0.0) {
         // Repulsion disabled by parameters.
         return;
     }
 
-    if (obs == NULL) {
-        // ---- Right wall at x = +world_half ----
-        Rho = world_half - s->x;  // distance from drone to right wall
-        if (Rho< clearance) {
-            if (d_right < eps) d_right = eps{
-                ux=1;
-                uy= 0;}
+    const double eps = 1e-3; // to avoid division by zero
 
- /*            double mag = gain * (1.0/d_right - 1.0/clearance);
-            if (mag < 0.0) mag = 0.0;
-            // Repulsive direction: push LEFT → (-1,0)
-            *Px -= mag; */
-/*         }
-
-        // ---- Left wall at x = -world_half ----
-        double d_left = world_half + s->x;   // distance from drone to left wall
-        elif (d_left < wall_clearance) {
-            if (d_left < eps) d_left = eps;
-            double mag = wall_gain * (1.0/d_left - 1.0/wall_clearance);
-            if (mag < 0.0) mag = 0.0;
-            // Repulsive direction: push RIGHT → (+1,0)
-            *Px += mag;
-        }
-
-        // ---- Top wall at y = +world_half ----
-        double d_top = world_half - s->y;
-        if (d_top < wall_clearance) {
-            if (d_top < eps) d_top = eps;
-            double mag = wall_gain * (1.0/d_top - 1.0/wall_clearance);
-            if (mag < 0.0) mag = 0.0;
-            // Repulsive direction: push DOWN → (0, -1)
-            *Py -= mag;
-        }
-
-        // ---- Bottom wall at y = -world_half ----
-        double d_bottom = world_half + s->y;
-        if (d_bottom < wall_clearance) {
-            if (d_bottom < eps) d_bottom = eps;
-            double mag = wall_gain * (1.0/d_bottom - 1.0/wall_clearance);
-            if (mag < 0.0) mag = 0.0;
-            // Repulsive direction: push UP → (0, +1)
-            *Py += mag;
-        }
-    }
-    else {
-
-        for (int k = 0; k < num_obs; ++k) {
-            double ox = obs[k].x;
-            double oy = obs[k].y;
-
-            double dx  = s->x - ox;
-            double dy  = s->y - oy;
-            double rho = sqrt(dx*dx + dy*dy);   // here calc how close the drone has become
-                   // ?? confirm this too
-        if (rho < eps) {
-            // On top of the obstacle: push strongly in some direction
-            rho = eps;
-        }
-
-        if (rho < obs_clearance) {
-            double mag = obs_gain * (1.0/rho - 1.0/obs_clearance);  // khatib
-            if (mag < 0.0) mag = 0.0;
-
-            double ux = dx / rho;  // unit vector away from obstacle
-            double uy = dy / rho;
-
-            // actual ux uy has to be aligned to the 8 lines and changed to a virtual key whose
-            // magniture will later be multiplied with the Fx, Fy retrieved from the key mapping
-            // ux, uy dotted withe the eight lines:
-            
-            // TODO: see which direction better alligns with the shorter Rho to obstacle
-            // retrieve Fx and Fy as per that, then 
-            *Px += mag * ux;
-            *Py += mag * uy;
-        }
-
+    // ---- Right wall at x = +world_half ----
+    double d_right = world_half - s->x;  // distance from drone to right wall
+    if (d_right < wall_clearance) {
+        if (d_right < eps) d_right = eps;
+        double mag = wall_gain * (1.0/d_right - 1.0/wall_clearance);
+        if (mag < 0.0) mag = 0.0;
+        // Repulsive direction: push LEFT → (-1,0)
+        *Px -= mag;
     }
 
-} */
+    // ---- Left wall at x = -world_half ----
+    double d_left = world_half + s->x;   // distance from drone to left wall
+    if (d_left < wall_clearance) {
+        if (d_left < eps) d_left = eps;
+        double mag = wall_gain * (1.0/d_left - 1.0/wall_clearance);
+        if (mag < 0.0) mag = 0.0;
+        // Repulsive direction: push RIGHT → (+1,0)
+        *Px += mag;
+    }
+
+    // ---- Top wall at y = +world_half ----
+    double d_top = world_half - s->y;
+    if (d_top < wall_clearance) {
+        if (d_top < eps) d_top = eps;
+        double mag = wall_gain * (1.0/d_top - 1.0/wall_clearance);
+        if (mag < 0.0) mag = 0.0;
+        // Repulsive direction: push DOWN → (0, -1)
+        *Py -= mag;
+    }
+
+    // ---- Bottom wall at y = -world_half ----
+    double d_bottom = world_half + s->y;
+    if (d_bottom < wall_clearance) {
+        if (d_bottom < eps) d_bottom = eps;
+        double mag = wall_gain * (1.0/d_bottom - 1.0/wall_clearance);
+        if (mag < 0.0) mag = 0.0;
+        // Repulsive direction: push UP → (0, +1)
+        *Py += mag;
+    }
+}

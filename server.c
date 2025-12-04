@@ -654,6 +654,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, SimParams params)
                                   fd_to_d,
                                   logfile,
                                   "state");
+                                  
         }
         
 
@@ -724,6 +725,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, SimParams params)
             if (oy < world_top) oy = world_top;
             if (oy > world_bottom) oy = world_bottom;
             
+            attron(COLOR_PAIR(1));
             mvaddch(oy, ox, 'o');  // TODO: add color to make them orange
             
             attroff(COLOR_PAIR(1));

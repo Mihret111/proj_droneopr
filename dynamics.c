@@ -69,16 +69,16 @@ void run_dynamics_process(int force_fd, int state_fd, SimParams params) {
             fprintf(stderr, "[D] Partial read (%d bytes) on force pipe.\n", n);
         }
 
-        /* 2) Compute wall repulsive force from current state.  <-- NEW
+        // 2) Compute wall repulsive force from current state.  <-- NEW
         double Pwx = 0.0, Pwy = 0.0;
         compute_wall_repulsive_P(&s, &params, &Pwx, &Pwy);
 
         // Total force = user force from B + wall repulsive force.
         double Fx_total = f.Fx + Pwx;
-        double Fy_total = f.Fy + Pwy; */
+        double Fy_total = f.Fy + Pwy;
 
-        double Fx_total = f.Fx;
-        double Fy_total = f.Fy;
+/*         double Fx_total = f.Fx;
+        double Fy_total = f.Fy; */
         // 3) Integrate dynamics with total force:
         //    dv/dt = (F_total - K v)/M
         double ax = (Fx_total - K * s.vx) / M;

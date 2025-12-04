@@ -102,11 +102,6 @@ void compute_repulsive_P(const DroneStateMsg *s,
                          double              *Px,
                          double              *Py);
 
-// Convenience wrappers (so your old code keeps compiling)
-void compute_wall_repulsive_P(const DroneStateMsg *s,
-                              const SimParams    *params,
-                              double *Px, double *Py);
-
 void compute_obstacles_repulsive_P(const DroneStateMsg *s,
                                    const SimParams     *params,
                                    const Obstacle      *obs,

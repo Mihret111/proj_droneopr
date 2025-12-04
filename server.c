@@ -119,21 +119,105 @@ static void send_total_force_to_d(const ForceStateMsg *user_force,
                                   const char          *reason)
 {
     double Pox = 0.0, Poy = 0.0;
-    compute_obstacles_repulsive_P(cur_state, params, obs, num_obs, &Pox, &Poy);
+        compute_obstacles_repulsive_P(cur_state, params, obs, num_obs, &Pox, &Poy);
 
-    ForceStateMsg out = *user_force;  // copy user part
-    out.Fx += Pox;
-    out.Fy += Poy;
+    // If very small, no obstacle contribution; just send user force.
+    double Pnorm2 = Pox*Pox + Poy*Poy;
+    if (Pnorm2 < 1e-6) {
+        ForceStateMsg out = *user_force;
+        if (write(fd_to_d, &out, sizeof(out)) == -1) {
+            perror("[B] write to D failed (no obs rep)");
+        } else if (logfile) {
+            fprintf(logfile,
+                    "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
+                    "Pobs ~ 0 -> Fx=%.2f Fy=%.2f\n",
+                    reason ? reason : "?",
+                    user_force->Fx, user_force->Fy,
+                    out.Fx, out.Fy);
+            fflush(logfile);
+        }
+        return;
+    }
 
+    // 2) Find discrete direction that best matches P_obs
+    int idx = best_dir8_for_vector(Pox, Poy);  // uses dot2 & g_dir8 from util.c
+    if (idx < 0) {
+        // P points opposite of all discrete directions (numerical corner case).
+        // Just use user force alone.
+        ForceStateMsg out = *user_force;
+        if (write(fd_to_d, &out, sizeof(out)) == -1) {
+            perror("[B] write to D failed (no good dir)");
+        } else if (logfile) {
+            fprintf(logfile,
+                    "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
+                    "Pobs=(%.2f,%.2f), no good dir -> Fx=%.2f Fy=%.2f\n",
+                    reason ? reason : "?",
+                    user_force->Fx, user_force->Fy,
+                    Pox, Poy,
+                    out.Fx, out.Fy);
+            fflush(logfile);
+        }
+        return;
+    }
+
+    char   best_key = g_dir8[idx].key;
+    double best_dot = dot2(Pox, Poy, g_dir8[idx].ux, g_dir8[idx].uy);
+
+    if (best_dot <= 0.0) {
+        // No helpful positive direction found
+        ForceStateMsg out = *user_force;
+        if (write(fd_to_d, &out, sizeof(out)) == -1) {
+            perror("[B] write to D failed (non-positive best_dot)");
+        } else if (logfile) {
+            fprintf(logfile,
+                    "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
+                    "Pobs=(%.2f,%.2f), best_dot<=0 -> Fx=%.2f Fy=%.2f\n",
+                    reason ? reason : "?",
+                    user_force->Fx, user_force->Fy,
+                    Pox, Poy,
+                    out.Fx, out.Fy);
+            fflush(logfile);
+        }
+        return;
+    }
+
+    // 3) Convert best_dot into a small number of key steps.
+    double step_force = params->force_step;
+
+    // How many steps would give a similar projection magnitude?
+    double n_steps_f = best_dot / (step_force + 1e-9);
+
+    // We round and clamp to avoid crazy big forces.
+    int n_steps = (int)(n_steps_f + 0.5);
+/*     if (n_steps < 1) n_steps = 1;
+    if (n_steps > 2) n_steps = 2; */  // keep obstacle push modest
+
+    // 4) Convert the chosen key into a direction (dFx,dFy).
+    double dFx, dFy;
+    direction_from_key(best_key, &dFx, &dFy);
+
+    // Virtual-key repulsive force
+    double Fvk_x = n_steps * dFx * step_force;
+    double Fvk_y = n_steps * dFy * step_force;
+
+    // 5) Combine user + virtual repulsive key into the final out message.
+    ForceStateMsg out = *user_force;
+    out.Fx += Fvk_x;
+    out.Fy += Fvk_y;
+
+    // 6) Send to D
     if (write(fd_to_d, &out, sizeof(out)) == -1) {
-        perror("[B] write to D failed (total force)");
+        perror("[B] write to D failed (obs virtual key)");
     } else if (logfile) {
         fprintf(logfile,
                 "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
-                "Pobs=(%.2f,%.2f) => Fx=%.2f Fy=%.2f\n",
+                "Pobs=(%.2f,%.2f), best_key=%c, n_steps=%d "
+                "Fvk=(%.2f,%.2f) => Fx=%.2f Fy=%.2f\n",
                 reason ? reason : "?",
                 user_force->Fx, user_force->Fy,
                 Pox, Poy,
+                best_key, n_steps,
+                Fvk_x, Fvk_y,
                 out.Fx, out.Fy);
         fflush(logfile);
     }

@@ -1,8 +1,8 @@
-# Architecture Documentation
+# Architectural Documentation
 
-## Architecture Sketch
+This project implements a simple 2D drone simulator using multiple POSIX processes and IPC primitives. The Master process initializes the simulation, creates communication pipes, and forks four child processes: **Keyboard (I)**, **Dynamics (D)**, **Obstacles (O)**, and **Targets (T)**. After forking, the Master process transitions into the **Server (B)** process. The server aggregates user input, environment information and simulation state, computes total forces (including wall and obstacle repulsion), and updates a User-Interface using `ncurses`.
 
-The application follows a multi-process architecture orchestrated by a **Master** process. The Master process initializes the simulation, creates communication pipes, and forks four child processes: **Keyboard (I)**, **Dynamics (D)**, **Obstacles (O)**, and **Targets (T)**. After forking, the Master process transitions into the **Server (B)** process.
+# 1- Architecture Sketch
 
 ```mermaid
 graph TD
@@ -14,66 +14,115 @@ graph TD
     T["Targets (T)"] -->|"TargetSetMsg"| B
     end
 ```
-## Component Definitions
+# 2. Active Components — Definitions, IPC, and Algorithms
 
-### 1. Master / Server (B)
--   **Role**: The central "Blackboard" and User Interface.
--   **Functionality**:
-    -   Initializes simulation parameters and resources.
-    -   Manages the global game state (drone position, score, obstacles, targets).
-    -   Renders the UI using `ncurses` (game world and inspection panel).
-    -   Multiplexes I/O using `select()` to handle inputs from all other processes.
-    -   Computes "Virtual Forces" for obstacle avoidance and sends commands to Dynamics.
--   **Primitives**: `fork()`, `pipe()`, `select()`, `ncurses`.
--   **Algorithms**:
-    -   **Force Calculation**: Aggregates user input and repulsive forces from obstacles/walls.
-    -   **Collision Detection**: Checks drone proximity to targets and obstacles.
+## 2.1 Keyboard Process (I)
+- Role: Reads keystrokes from the user and forwards them to the Server.
+- IPC: Sends `KeyMsg → B` (pipe)
+- Behaviour:
+    - Blocking read using `getchar()`
+    - Sends every keystroke immediately
+    - Supports directional cluster:
+                w   e   r
+                s   d   f
+                x   c   v
+    - Special keys:
+    - `d` → brake (zero force)
+    - `p` → toggle pause
+    - `R` → reset drone
+    - `q` → quit all processes
 
-### 2. Dynamics (D)
--   **Role**: The Physics Engine.
--   **Functionality**:
-    -   Maintains the physics state of the drone (position, velocity).
-    -   Receives force commands from the Server.
-    -   Computes wall repulsion forces locally.
-    -   Integrates the equations of motion to update state.
-    -   Sends updated state back to the Server.
--   **Primitives**: `read()`, `write()`, `nanosleep()`.
--   **Algorithms**:
-    -   **Euler Integration**: Updates velocity and position based on total force ($F_{total} = F_{user} + F_{wall} - K \cdot v$) and time step $dt$.
+## 2.2 Server / Blackboard Process (B)
+- Role: Main coordinator. Manages all IPC, world state, UI, scoring, environment logic.
+- IPC:
+    - Reads `KeyMsg` from I  
+    - Reads `DroneStateMsg` from D  
+    - Reads `ObstacleSetMsg` from O  
+    - Reads `TargetSetMsg` from T  
+    - Writes `ForceStateMsg` to D  
+    - Uses `select()` to wait on multiple pipes
+- Algorithms / Responsibilities:
+    - User Force Handling
+        - Updates accumulated user force from key cluster
+        - Brake (`d`) resets force to zero
+        - Pause freezes the simulation
+    - Virtual-Key Obstacle Repulsion  
+        - Compute continuous obstacle repulsive vector
+        - Project onto 8 key directions
+        - Select maximum positive projection
+        - Convert magnitude to virtual key impulses
+        - Update force accordingly
+    - Target & Obstacle Filtering
+        B ensures valid spawning:
+        **Targets rejected if:**
+        - too close to walls
+        - too close to active obstacles
 
-### 3. Keyboard (I)
--   **Role**: Input Driver.
--   **Functionality**:
-    -   Captures raw keyboard input from the user.
-    -   Sends key codes to the Server.
--   **Primitives**: Standard I/O.
+        **Obstacles rejected if:**
+        - too close to active targets
+        - new batch arrives while old ones still active
+    - Target Hit Detection / Scoring
+        If drone gets within `R_hit` of a target:
+        - target deactivates  
+        - score increments  
+        - last-hit time updated  
+    - World Rendering (ncurses)
+        - Left pane → world (drone, walls, obstacles, targets)
+        - Right pane → telemetry + score
+        - Top row → instructions
+        - UI updates every cycle
+    - Pause / Reset / Quit
+        - Pause freezes: obstacles, targets, forces, physics
+        - Reset: set drone to origin with zero velocity
+        - Quit: clean shutdown of all processes
 
-### 4. Obstacles (O)
--   **Role**: Content Generator.
--   **Functionality**:
-    -   Periodically generates sets of random obstacles.
-    -   Sends obstacle data (position, lifetime) to the Server.
--   **Primitives**: `rand()`, `sleep()`.
+## 2.3 Dynamics Process (D)
+- Role: Simulates drone physics in real time.
+- IPC:
+    - Reads `ForceStateMsg` from B  
+    - Writes `DroneStateMsg` to B  
+- Algorithms: Applies 2D dynamics:
+    - Adds continuous Khatib wall-repulsion  
+    - Handles reset command  
+    - Uses `nanosleep(dt)` for real-time pacing
 
-### 5. Targets (T)
--   **Role**: Content Generator.
--   **Functionality**:
-    -   Periodically generates sets of random targets.
-    -   Sends target data (position, lifetime) to the Server.
--   **Primitives**: `rand()`, `sleep()`.
+## 2.4 Obstacle Generator Process (O)
+- Role: Periodically generates dynamic obstacles.
+- IPC: Sends `ObstacleSetMsg → B`
+- Algorithms:
+    - Samples random positions in an inner safe box  
+    - Enforces minimum spacing  
+    - Assigns lifetime (`life_steps`)  
+    - New waves only accepted when none active  
 
-## List of Components and Files
+## 2.5 Target Generator Process (T)
+- Role: Generates collectible targets.
+- IPC:Sends `TargetSetMsg → B`
+- Algorithms:
+    - Samples target positions in a central disk  
+    - Applies spacing constraints  
+    - B further filters targets:
+        - too close to walls → reject
+        - too close to obstacles → reject  
 
-### Components
-The system is composed of the following active components:
+## 2.6 Parameter Module (`params.c`)
+- Loads simulation parameters from `params.txt`:
+    - mass, visc, dt  
+    - force_step  
+    - world_half  
+    - spawn timings & clearances  
 
-1.  **Master / Server (B)**: The central hub handling game state, UI, and communication.
-2.  **Dynamics (D)**: Physics engine calculating drone movement.
-3.  **Keyboard (I)**: Captures user input.
-4.  **Obstacles (O)**: Generates obstacles.
-5.  **Targets (T)**: Generates targets.
+## 2.7 Utility Module (`util.c`)
+- Shared helpers:
+    - `check_target_hits()` for scoring  
+    - distance filtering functions  
+    - random sampling helpers  
+    - direction-vector utilities for virtual keys  
 
-### File Structure
+
+## 3 File Organization
+
+### 3.1 File Structure
 
 ```text
 .
@@ -102,7 +151,7 @@ The system is composed of the following active components:
 ```
 
 
-### Source Files
+### 3.2 Source Files
 -   `main.c`: Entry point. Handles parameter loading, pipe creation, and process forking.
 -   `server.c`: Implementation of the Server (B) process logic and UI.
 -   `dynamics.c`: Implementation of the Dynamics (D) process physics loop.
@@ -112,7 +161,7 @@ The system is composed of the following active components:
 -   `params.c`: Helper functions for loading and initializing simulation parameters.
 -   `util.c`: Shared utility functions (math, logging, helpers).
 
-#### Headers (`./headers/`)
+### 3.3 Headers (`./headers/`)
 *   `server.h`: Server definitions.
 *   `dynamics.h`: Dynamics definitions.
 *   `keyboard.h`: Keyboard definitions.
@@ -122,11 +171,11 @@ The system is composed of the following active components:
 *   `util.h`: Utility definitions.
 *   `messages.h`: IPC message structures.
 
-### Configuration
--   `params.txt`: Runtime configuration file for simulation parameters (Mass, Viscosity, Time step, etc.) (can be modified in real-time).
+### 3.4 Configuration
+-   `params.txt`: Runtime configuration of drone parameters (can be modified in real-time).
 -   `log.txt`: Log file kept aside with redirected instantaneous values from the inspection window.
 
-#### Build & Documentation
+#### 3.5 Build & Documentation
 *   `Makefile`: Build configuration.
 *   `README.md`: Project overview.
 *   `Architecture.md`: System architecture documentation.

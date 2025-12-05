@@ -76,7 +76,8 @@ double dot2(double ax, double ay, double bx, double by) {
     return ax * bx + ay * by;
 }
 
-// ----------------------------------------------
+// Compute the maximum dot product between a vector and the 8-directions
+// ------------------ --------------------------------------------------------------
 int best_dir8_for_vector(double Px, double Py) {
     double best_dot = 0.0;
     int    best_idx = -1;
@@ -91,8 +92,126 @@ int best_dir8_for_vector(double Px, double Py) {
     return best_idx;
 }
 
-// Computes repulsive force
-// ----------------------------------------------
+// Sends total force to D using a "virtual key" computed from obstacles and walls
+// ----------------------------------------------------------------------
+void send_total_force_to_d(const ForceStateMsg *user_force,
+                                  const DroneStateMsg *cur_state,
+                                  const SimParams     *params,
+                                  const Obstacle      *obs,
+                                  int                  num_obs,
+                                  int                  fd_to_d,
+                                  FILE                *logfile,
+                                  const char          *reason)
+{
+    // Computes repulsive force vector 
+    double Px = 0.0, Py = 0.0;
+    compute_repulsive_P(cur_state,
+                        params,
+                        obs,
+                        num_obs,
+                        false,   // calculate repulsive force for obstacles here
+                        true,   // include_obstacles
+                        &Px, &Py);
+
+    // Sends user_force alone if very small.
+    double Pnorm2 = Px*Px + Py*Py;
+    if (Pnorm2 < 1e-6) {
+        ForceStateMsg out = *user_force;
+        if (write(fd_to_d, &out, sizeof(out)) == -1) {
+            perror("[B] write to D failed (no rep)");
+        } else if (logfile) {
+            fprintf(logfile,
+                    "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
+                    "P ~ 0 -> Fx=%.2f Fy=%.2f\n",
+                    reason ? reason : "?",
+                    user_force->Fx, user_force->Fy,
+                    out.Fx, out.Fy);
+            fflush(logfile);
+        }
+        return;
+    }
+
+    // Finds discrete direction that best matches the repulsion P
+    int idx = best_dir8_for_vector(Px, Py);  // util.c
+    if (idx < 0) {
+        // Falls back to user-only command if no good direction
+        ForceStateMsg out = *user_force;
+        if (write(fd_to_d, &out, sizeof(out)) == -1) {
+            perror("[B] write to D failed (no good dir)");
+        } else if (logfile) {
+            fprintf(logfile,
+                    "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
+                    "P=(%.2f,%.2f), no good dir -> Fx=%.2f Fy=%.2f\n",
+                    reason ? reason : "?",
+                    user_force->Fx, user_force->Fy,
+                    Px, Py,
+                    out.Fx, out.Fy);
+            fflush(logfile);
+        }
+        return;
+    }
+
+    char   best_key = g_dir8[idx].key;
+    double best_dot = dot2(Px, Py, g_dir8[idx].ux, g_dir8[idx].uy);   // the maximum projection of P on the direction vector
+
+    if (best_dot <= 0.0) {
+        // Same: Falls back to user-only command if projection is not positive
+        ForceStateMsg out = *user_force;
+        if (write(fd_to_d, &out, sizeof(out)) == -1) {
+            perror("[B] write to D failed (best_dot<=0)");
+        } else if (logfile) {
+            fprintf(logfile,
+                    "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
+                    "P=(%.2f,%.2f), best_dot<=0 -> Fx=%.2f Fy=%.2f\n",
+                    reason ? reason : "?",
+                    user_force->Fx, user_force->Fy,
+                    Px, Py,
+                    out.Fx, out.Fy);
+            fflush(logfile);
+        }
+        return;
+    }
+
+    // Converts best_dot (intensity of P) into 8 key steps
+    double step_force = params->force_step;
+    double n_steps_f  = best_dot / (step_force + 1e-9);
+
+    int n_steps = (int)(n_steps_f + 0.5);    // round to nearest integer
+    // if (n_steps < 1) n_steps = 1;
+    // if (n_steps > 3) n_steps = 3;   // Tunable
+
+    // Gets direction from key
+    double dFx, dFy;
+    direction_from_key(best_key, &dFx, &dFy);
+
+    double Fvk_x = n_steps * dFx * step_force;
+    double Fvk_y = n_steps * dFy * step_force;
+
+    // Combines user + virtual-key repulsion
+    ForceStateMsg out = *user_force;
+    out.Fx += Fvk_x;
+    out.Fy += Fvk_y;
+
+    // Sends to D
+    if (write(fd_to_d, &out, sizeof(out)) == -1) {
+        perror("[B] write to D failed (virtual key rep)");
+    } else if (logfile) {
+        fprintf(logfile,
+                "SEND_FORCE (%s): userFx=%.2f userFy=%.2f, "
+                "P=(%.2f,%.2f), best_key=%c, n_steps=%d "
+                "Fvk=(%.2f,%.2f) => Fx=%.2f Fy=%.2f\n",
+                reason ? reason : "?",
+                user_force->Fx, user_force->Fy,
+                Px, Py,
+                best_key, n_steps,
+                Fvk_x, Fvk_y,
+                out.Fx, out.Fy);
+        fflush(logfile);
+    }
+}
+
+// Computes ontinuous repulsive force vector
+// ------------------ --------------------------------------------------------------
 void compute_repulsive_P(const DroneStateMsg *s,
                          const SimParams     *params,
                          const Obstacle      *obs,
@@ -103,11 +222,13 @@ void compute_repulsive_P(const DroneStateMsg *s,
                          double              *Py)
 {
     const double eps = 1e-3;
-    include_walls = false;
     *Px = 0.0;
     *Py = 0.0;
 
-    // -------------------- WALL REPULSION --------------------
+    
+    // Computes wall repulsion force
+    // Returns vector (Px,Py) as the sum of contributions for the 4 borders
+    // ------------------ --------------------------------------------------------------
     if (include_walls) {
         double world_half     = params->world_half;
         double wall_clearance = params->wall_clearance;
@@ -156,8 +277,9 @@ void compute_repulsive_P(const DroneStateMsg *s,
         }
     }
 
+    // Computes wall repulsion force continuous force(later mapped to the directions of the key cluster)
     // Uses fixed obstacle params derived from world size
-    // ------------------ -------------------
+    // ------------------ --------------------------------------------------------------
     if (include_obstacles && obs && num_obs > 0) {
          const double obs_clearance = params->world_half * 0.30;
         const double obs_gain      = 120.0;   // 120 behaved well
@@ -192,112 +314,6 @@ void compute_repulsive_P(const DroneStateMsg *s,
         }
     }
 }
-
-// Computes wall repulsion force
-// Returns vector (Px,Py) as the sum of contributions for the 4 borders
-// ------------------ -------------------
-void compute_wall_repulsive_P(const DroneStateMsg *s,
-                              const SimParams    *params,
-                              double *Px, double *Py)
-{
-    double world_half     = params->world_half;
-    double wall_clearance = params->wall_clearance;
-    double wall_gain      = params->wall_gain;
-
-    *Px = 0.0;
-    *Py = 0.0;
-
-    if (wall_clearance <= 0.0 || wall_gain <= 0.0) {
-        // Repulsion disabled by parameters.
-        return;
-    }
-
-    const double eps = 1e-3; // to avoid division by zero
-
-    // ---- Right wall at x = +world_half ----
-    double d_right = world_half - s->x;  // distance from drone to right wall
-    if (d_right < wall_clearance) {
-        if (d_right < eps) d_right = eps;
-        double mag = wall_gain * (1.0/d_right - 1.0/wall_clearance);
-        if (mag < 0.0) mag = 0.0;
-        // Repulsive direction: Pushes LEFT → (-1,0)
-        *Px -= mag;
-    }
-
-    // ---- Left wall at x = -world_half ----
-    double d_left = world_half + s->x;   // distance from drone to left wall
-    if (d_left < wall_clearance) {
-        if (d_left < eps) d_left = eps;
-        double mag = wall_gain * (1.0/d_left - 1.0/wall_clearance);
-        if (mag < 0.0) mag = 0.0;
-        // Repulsive direction: Pushes RIGHT → (+1,0)
-        *Px += mag;
-    }
-
-    // ---- Top wall at y = +world_half ----
-    double d_top = world_half - s->y;
-    if (d_top < wall_clearance) {
-        if (d_top < eps) d_top = eps;
-        double mag = wall_gain * (1.0/d_top - 1.0/wall_clearance);
-        if (mag < 0.0) mag = 0.0;
-        // Repulsive direction: Pushes DOWN → (0, -1)
-        *Py -= mag;
-    }
-
-    // ---- Bottom wall at y = -world_half ----
-    double d_bottom = world_half + s->y;
-    if (d_bottom < wall_clearance) {
-        if (d_bottom < eps) d_bottom = eps;
-        double mag = wall_gain * (1.0/d_bottom - 1.0/wall_clearance);
-        if (mag < 0.0) mag = 0.0;
-        // Repulsive direction: Pushes UP → (0, +1)
-        *Py += mag;
-    }
-}
-
-
-// Checks if a point (x,y) is too close to the walls
-// ------------------ -------------------
-int target_too_close_to_wall(double x,
-                                    double y,
-                                    const SimParams *params,
-                                    double wall_margin)
-{
-    int insp_width = 35;              
-    double wh = params->world_half;
-    double mod_wh = wh - wall_margin+insp_width; 
-    double dx_to_wall = mod_wh - fabs(x);
-    double dy_to_wall = wh - fabs(y);
-
-    if (dx_to_wall < wall_margin) return 1;
-    if (dy_to_wall < wall_margin) return 1;
-
-    return 0;
-}
-
-// Checks if position oftarget/obstacle is too close to any active obstacle/ target, respectively
-// ------------------ -------------------
-int too_close_to_any_pointlike(double px,
-                               double py,
-                               const PointLike *arr,
-                               int count,
-                               double min_dist)
-{
-    double min_d2 = min_dist * min_dist;
-
-    for (int i = 0; i < count; ++i) {
-        if (!arr[i].active)
-            continue;
-
-        double dx = px - arr[i].x;
-        double dy = py - arr[i].y;
-
-        if (dx*dx + dy*dy <= min_d2)
-            return 1;
-    }
-    return 0;
-}
-
 
 // Checks if the drone has "hit" any active target.
 // Returns: number of targets collected in this call (0 or more).
@@ -350,4 +366,55 @@ int check_target_hits(const DroneStateMsg *cur_state,
 double rand_in_range(double min, double max) {
     double u = (double)rand() / (double)RAND_MAX;  // b/n [0,1]
     return min + u * (max - min);                  // linear interpolation
+}
+
+
+
+// ------------------ --------------------------------------------------------------
+// Meaningfull spawning :                        
+// Checks against cases which don't serve the purpose of the game
+//------- --------------------------------------------------------------------------
+
+// Checks if a candidate target spawning point (x,y) is too close to the walls
+// (targets too close to the walls are unattainable)
+// ------------------ --------------------------------------------------------------
+int target_too_close_to_wall(double x,
+                                    double y,
+                                    const SimParams *params,
+                                    double wall_margin)
+{
+    int insp_width = 35;              
+    double wh = params->world_half;
+    double mod_wh = wh - wall_margin+insp_width; 
+    double dx_to_wall = mod_wh - fabs(x);
+    double dy_to_wall = wh - fabs(y);
+
+    if (dx_to_wall < wall_margin) return 1;
+    if (dy_to_wall < wall_margin) return 1;
+
+    return 0;
+}
+
+// Checks if position of target/obstacle is too close to any active obstacle/ target, respectively
+// (targets with too close obstacles are unattainable )
+// ------------------ --------------------------------------------------------------------------
+int too_close_to_any_pointlike(double px,
+                               double py,
+                               const PointLike *arr,
+                               int count,
+                               double min_dist)
+{
+    double min_d2 = min_dist * min_dist;
+
+    for (int i = 0; i < count; ++i) {
+        if (!arr[i].active)
+            continue;
+
+        double dx = px - arr[i].x;
+        double dy = py - arr[i].y;
+
+        if (dx*dx + dy*dy <= min_d2)
+            return 1;
+    }
+    return 0;
 }

@@ -7,7 +7,7 @@
 #define _GNU_SOURCE
 
 
-#define NUM_TARGETS 5  // Defines number of targets
+#define NUM_TARGETS 12  // Defines number of targets
 
 typedef struct {
     double x;

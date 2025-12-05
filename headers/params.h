@@ -1,6 +1,6 @@
 // params.h
 // Defines simulation parameters 
-// Stores parameters loaded once in main() and passed by value into B and D.
+// Stores parameters loaded once in main() and passed by value into B and D
 // ======================================================================
 
 #ifndef PARAMS_H

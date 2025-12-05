@@ -1,5 +1,5 @@
 // server.h
-// Defines interface for the server/blackboard process (B).
+// Interface for the server/blackboard process (B)
 // ======================================================================
 
 #ifndef SERVER_H

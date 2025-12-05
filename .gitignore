@@ -16,3 +16,4 @@ params.o
 server.o
 targets.o
 util.o
+.gitignore

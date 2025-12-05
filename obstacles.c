@@ -27,12 +27,12 @@ void run_obstacle_process(int write_fd, SimParams params) {
     // Decides how long a batch stays on screen
     const int life_steps_default = 1000;    // e.g. 800 physics steps
 
-    // Defines margin from walls: keep obstacles inside this inner box.
-    // Example: 20% margin on each side.
+    // Defines margin from walls: keep obstacles inside this inner box
+    // Example: 20% margin on each side
     const double margin_factor   = 0.20;
     double margin                = world_half * margin_factor;
 
-    // Defines minimum spacing between obstacles in the same batch.
+    // Defines minimum spacing between obstacles in the same batch
     const double spacing_factor  = 0.15;   // 15% of world_half
     double min_spacing           = world_half * spacing_factor;
     double min_spacing2          = min_spacing * min_spacing;

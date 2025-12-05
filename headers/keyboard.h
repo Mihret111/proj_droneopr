@@ -1,5 +1,5 @@
 // keyboard.h
-// Interface for the keyboard process (I).
+// Interface for the keyboard process (I)
 // ======================================================================
 
 #ifndef KEYBOARD_H

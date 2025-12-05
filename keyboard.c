@@ -22,10 +22,10 @@ void run_keyboard_process(int write_fd) {
     fprintf(stderr,
         "[I] Keyboard process started.\n"
         "[I] Use w e r / s d f / x c v to command force.\n"
-        "[I] 'd' = brake, 'p' = pause, 'X' = reset, 'q' = quit.\n");
+        "[I] 'd' = brake, 'p' = pause, 'O' = reset, 'q' = quit.\n");
 
     while (1) {
-        int c = getchar(); // a blocking read from stdin
+        int c = getchar(); // blocking read from stdin
 
         if (c == EOF) {
             fprintf(stderr, "[I] EOF on stdin, exiting keyboard process.\n");

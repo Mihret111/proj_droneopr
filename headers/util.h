@@ -8,9 +8,13 @@
 #include "messages.h" // for DroneStateMsg
 #include "params.h"   // for SimParams
 #include <stdbool.h>
-#include "obstacles.h"   // add this near the top (after guards)
+#include "obstacles.h"   
 #include "targets.h"   
 
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h> 
+#include <stdlib.h>
 
 // Prints error message (with errno) and exit.
 void die(const char *msg);
@@ -51,21 +55,18 @@ extern const Dir8 g_dir8[8];
 // Returns -1 if all dot products are <= 0 to mean no "good" allignment found.
 int best_dir8_for_vector(double Px, double Py);
 
-// Computes wall repulsion field (Khatib-like)
-void compute_wall_repulsive_P(const DroneStateMsg *s,
-                              const SimParams    *params,
-                              double *Px, double *Py);
-
 // Does dot product of two vectors
 double dot2(double ax, double ay, double bx, double by);
 
-// Repulsion field from walls
-void compute_wall_repulsive_P(const DroneStateMsg *s,
-                              const SimParams    *params,
-                              double *Px, double *Py);
-
-// Find best 8-direction index
-int best_dir8_for_vector(double Px, double Py);
+// Computes total force vector using a "virtual key" computed from obstacles or walls
+void send_total_force_to_d(const ForceStateMsg *user_force,
+                                  const DroneStateMsg *cur_state,
+                                  const SimParams     *params,
+                                  const Obstacle      *obs,
+                                  int                  num_obs,
+                                  int                  fd_to_d,
+                                  FILE                *logfile,
+                                  const char          *reason);
 
 // Computes unified repulsive field from point obstacles
 void compute_repulsive_P(const DroneStateMsg *s,
@@ -77,12 +78,6 @@ void compute_repulsive_P(const DroneStateMsg *s,
                          double              *Px,
                          double              *Py);
 
-void compute_obstacles_repulsive_P(const DroneStateMsg *s,
-                                   const SimParams     *params,
-                                   const Obstacle      *obs,
-                                   int                  num_obs,
-                                   double              *Px,
-                                   double              *Py);
 // Checks if a point (x,y) is too close to the walls.
 int target_too_close_to_wall(double x,
                                     double y,

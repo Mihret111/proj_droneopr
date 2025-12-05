@@ -6,7 +6,7 @@
 #define OBSTACLES_H
 
 
-#define NUM_OBSTACLES 5
+#define NUM_OBSTACLES 12 // Defines number of obstacles
 
 typedef struct {
     double x;

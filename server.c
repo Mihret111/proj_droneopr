@@ -897,10 +897,12 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
             mvprintw(info_y +12, info_x, "Score: %d", g_score);
             mvprintw(info_y +13, info_x, "Targets collected: %d", g_targets_collected);
             if (g_last_hit_step >= 0) {
-                mvprintw(info_y +14, info_x, "Last hit at step: %d", g_last_hit_step);
+                double time_since_last_hit = (g_step_counter - g_last_hit_step) * params.dt;
+                mvprintw(info_y +15, info_x, "Since last hit: %.2f sec", time_since_last_hit);
             } else {
                 mvprintw(info_y +14, info_x, "Last hit: none");
             }
+
         }
 
         refresh();

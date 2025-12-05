@@ -182,112 +182,6 @@ static void send_total_force_to_d(const ForceStateMsg *user_force,
 }
 
 
-//function to map wall repulsion to a virtual key
-
-// ----------------------------------------------------------------------
-// Given the current state and parameters, compute the total wall
-// repulsive vector P (using util.c), project it onto the 8 directions,
-// choose the direction with maximum positive projection, and interpret
-// that as a "virtual key" that pushes the drone away from the walls.
-//
-// If a significant repulsion is found, this function:
-//   - updates cur_force (vectorially, like a key)
-//   - sends cur_force to D via fd_to_d
-//   - logs the event to logfile.
-//
-// If no significant repulsion is needed, it does nothing.
-// ----------------------------------------------------------------------
-// ----------------------------------------------------------------------
-// WALL REPULSION via "virtual key" *without* accumulating into cur_force.
-//
-// cur_force   = persistent user force (from real keys).
-// cur_state   = current drone state from D.
-// params      = simulation + wall params.
-// fd_to_d     = pipe to D.
-// logfile     = for debug logging.
-// paused      = if true, we don't apply automatic corrections.
-//
-// We compute P from the 4 walls, project it onto the 8 directions,
-// choose the best direction, build a *temporary* repulsive contribution
-// F_rep, and send (cur_force + F_rep) to D.
-// cur_force itself is NOT modified, so repulsion does not explode over time.
-// ----------------------------------------------------------------------
-static void apply_wall_repulsion_virtual_key(ForceStateMsg       *cur_force,
-                                             const DroneStateMsg *cur_state,
-                                             const SimParams     *params,
-                                             int                  fd_to_d,
-                                             FILE                *logfile,
-                                             bool                 paused)
-{
-    if (paused) {
-        // When paused, do not do any automatic wall corrections.
-        return;
-    }
-
-    // 1) Compute continuous repulsive vector P from the four walls.
-    double Px = 0.0, Py = 0.0;
-    compute_wall_repulsive_P(cur_state, params, &Px, &Py);
-
-    // If P is very small, no need to do anything special.
-    double Pnorm2 = Px*Px + Py*Py;
-    if (Pnorm2 < 1e-6) {
-        return;
-    }
-
-    // 2) Find which of the 8 discrete directions best matches P.
-    int idx = best_dir8_for_vector(Px, Py);
-    if (idx < 0) {
-        // No direction with positive projection => skip.
-        return;
-    }
-
-    char   best_key = g_dir8[idx].key;
-    double best_dot = dot2(Px, Py, g_dir8[idx].ux, g_dir8[idx].uy);
-
-    if (best_dot <= 0.0) {
-        return;
-    }
-
-    // 3) Convert best_dot (a continuous magnitude) into a "virtual key"
-    //    contribution. Important difference vs before:
-    //    we DO NOT add it into cur_force; we just build a temporary F_rep.
-    double step_force = params->force_step;
-
-    // Approximate how many key steps would correspond to best_dot.
-    double n_steps_f = best_dot / (step_force + 1e-9);
-
-    // Round and clamp to keep repulsion moderate (no explosions).
-    int n_steps = (int)(n_steps_f + 0.5);
-    if (n_steps < 1) n_steps = 1;
-    if (n_steps > 2) n_steps = 2;   // smaller than before to reduce bouncing
-
-    // 4) Convert chosen key to unit direction (dFx, dFy).
-    double dFx, dFy;
-    direction_from_key(best_key, &dFx, &dFy);
-
-    // Build repulsive force vector F_rep (NOT stored in cur_force).
-    double Frep_x = n_steps * dFx * step_force;
-    double Frep_y = n_steps * dFy * step_force;
-
-    // 5) Construct the total force to send: user force + repulsive force.
-    ForceStateMsg out = *cur_force;  // copy the persistent user force
-    out.Fx += Frep_x;
-    out.Fy += Frep_y;
-    out.reset = 0;
-
-    // 6) Send this total force to D.
-    if (write(fd_to_d, &out, sizeof(out)) == -1) {
-        perror("[B] write to D failed (wall repulsion)");
-    } else if (logfile) {
-        fprintf(logfile,
-                "WALL_REPULSION: P=(%.2f,%.2f), best_key=%c, n_steps=%d, "
-                "Frep=(%.2f,%.2f), outFx=%.2f outFy=%.2f\n",
-                Px, Py, best_key, n_steps,
-                Frep_x, Frep_y, out.Fx, out.Fy);
-        fflush(logfile);
-    }
-}
-
 
 
 
@@ -306,21 +200,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
         die("[B] cannot open log.txt");
     }
 
-    // -------------------------------------------
-    // Initialize 8 obstacles in world coordinates
-    // (you can tweak positions later)
-    // -------------------------------------------
-    double R = params.world_half * 0.5;  // radius for placing obstacles
-    g_obstacles[0] = (Obstacle){ +0.0, +R };
-    g_obstacles[1] = (Obstacle){ +R, +0.0 };
-    g_obstacles[2] = (Obstacle){ +0.0, -R };
-    g_obstacles[3] = (Obstacle){ -R, +0.0 };
-    g_obstacles[4] = (Obstacle){ -R, -0.0 };
-    g_obstacles[5] = (Obstacle){ +R * 0.7, +R * 0.7 };
-    g_obstacles[6] = (Obstacle){ -R * 0.7, +R * 0.7 };
-    g_obstacles[7] = (Obstacle){ -R * 0.7, -R * 0.7 };
-
-
+ 
     // --- Blackboard state (shared model of the world) ---
     ForceStateMsg cur_force;
     cur_force.Fx = 0.0;
@@ -351,6 +231,9 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
 
 
     int max_y, max_x;
+
+    //needed for handling time_ince_last_hit
+    double time_since_last_hit = 0; // for tracking time since last hit
 
     // --- Main event loop ---
     while (1) {
@@ -403,7 +286,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
         if (has_colors() == FALSE) {
             endwin();
             printf("Your terminal does not support colors.\n");
-        return 1;
+        return;
         }
 
         // Define a custom colors for target and obstacles
@@ -588,7 +471,9 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
 
             cur_state = s;
             // Increment global step counter (one more state update)
-            g_step_counter++;
+            if (!paused) {
+                g_step_counter++;
+            }   
 
             fprintf(logfile,
                     "STATE: x=%.2f y=%.2f vx=%.2f vy=%.2f\n",
@@ -884,6 +769,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
         int info_y = world_top;
         int info_x = insp_start_x + 1;
 
+        
         if (info_x < max_x - 1) {
             mvprintw(info_y,     info_x, "INSPECTION");
             mvprintw(info_y + 2, info_x, "Last key: %c", last_key);
@@ -896,10 +782,12 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
             
             mvprintw(info_y +12, info_x, "Score: %d", g_score);
             mvprintw(info_y +13, info_x, "Targets collected: %d", g_targets_collected);
-            if (g_last_hit_step >= 0) {
-                double time_since_last_hit = (g_step_counter - g_last_hit_step) * params.dt;
+            if (g_last_hit_step >= 0 ) {
+                time_since_last_hit = (g_step_counter - g_last_hit_step) * params .dt;
+
                 mvprintw(info_y +15, info_x, "Since last hit: %.2f sec", time_since_last_hit);
-            } else {
+            }
+            else {
                 mvprintw(info_y +14, info_x, "Last hit: none");
             }
 

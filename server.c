@@ -8,6 +8,12 @@
 //   - Reacts to the commands pause 'p', reset 'O', brake 'd', quit 'q'
 // ======================================================================
 
+#define _POSIX_C_SOURCE 200809L
+#include <signal.h>
+#include <string.h>
+#include <sys/select.h>   // for fd_set, FD_ZERO, FD_SET, select()
+#include <sys/types.h>
+
 #include "headers/server.h"
 #include "headers/messages.h"
 #include "headers/util.h"
@@ -20,8 +26,6 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdbool.h>
-
-#include <sys/select.h>   // for fd_set, FD_ZERO, FD_SET, select()
 #include <math.h>  // for sqrt, to be used in key mapping instead of hard code, REP
 
 //#define NUM_OBSTACLES 8
@@ -34,6 +38,27 @@ static int g_targets_collected = 0;
 static int g_last_hit_step     = -1;
 static int g_step_counter      = 0;
 
+// ---------------- Watchdog signal flags (set by signal handlers) ----------------
+static volatile sig_atomic_t g_wd_warning_flag = 0; // set by SIGUSR2 handler
+static volatile sig_atomic_t g_wd_stop    = 0;  // set when SIGTERM arrives
+
+static void on_watchdog_warning(int signo) {
+    (void)signo;
+    g_wd_warning_flag = 1;
+}
+
+static void on_watchdog_stop(int signo) {
+    (void)signo;
+    g_wd_stop = 1;
+}
+
+// ---------------- Watchdog banner UI state ----------------
+// Show a warning banner for a limited amount of time after SIGUSR2.
+// We store it as "how many simulation steps remaining".
+
+static int g_wd_banner_steps_left = 0;  // countdown managed in main loop
+static const char *g_wd_banner_msg = NULL;
+
 // ----------------------------------------------------------------------
 // Runs the server process:
 //   - reads KeyStateMsg   from fd_kb (from I)
@@ -42,7 +67,7 @@ static int g_step_counter      = 0;
 //   - Reads ObstacleMsg   from fd_obs (from B)
 //   - Reads TargetMsg   from fd_tgt (from B)
 // ----------------------------------------------------------------------
-void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int fd_tgt, SimParams params) 
+void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int fd_tgt, pid_t pid_W, SimParams params) 
 {
     // --- Initialize ncurses ---
     initscr();
@@ -57,7 +82,28 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
         die("[B] cannot open log.txt");
     }
 
- 
+    // ---------------- Install signal handlers for Watchdog ----------------
+    struct sigaction sa_warn;
+    memset(&sa_warn, 0, sizeof(sa_warn));
+    sa_warn.sa_handler = on_watchdog_warning;
+    sigemptyset(&sa_warn.sa_mask);
+    sa_warn.sa_flags = SA_RESTART;
+    if (sigaction(SIGUSR2, &sa_warn, NULL) == -1) {
+        fprintf(logfile, "[B] sigaction(SIGUSR2) failed: %s\n", strerror(errno));
+        fflush(logfile);
+    }
+
+    struct sigaction sa_stop;
+    memset(&sa_stop, 0, sizeof(sa_stop));
+    sa_stop.sa_handler = on_watchdog_stop;
+    sigemptyset(&sa_stop.sa_mask);
+    sa_stop.sa_flags = SA_RESTART;
+    if (sigaction(SIGTERM, &sa_stop, NULL) == -1) {
+        fprintf(logfile, "[B] sigaction(SIGTERM) failed: %s\n", strerror(errno));
+        fflush(logfile);
+    }
+
+
     // --- Defines Blackboard state (model of the world)
     ForceStateMsg cur_force;
     cur_force.Fx = 0.0;
@@ -88,6 +134,32 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
 
     // --- Main event loop ---
     while (1) {
+
+        // ---------------- Watchdog notifications ----------------
+        // Watchdog warning -> start banner
+        // Convert the SIGUSR2 flag into a visible banner for 2 seconds.
+        // We do this here (NOT in signal handler) because ncurses is not signal-safe.
+        if (g_wd_warning_flag) {
+            g_wd_warning_flag = 0;
+
+            // 2 seconds worth of steps (at least 1 step)
+            int steps_2sec = (int)(2.0 / params.dt);
+            if (steps_2sec < 1) steps_2sec = 1;
+
+            g_wd_banner_steps_left = steps_2sec;
+            g_wd_banner_msg = "WATCHDOG WARNING: no heartbeat detected (system may be stuck)";
+
+            fprintf(logfile, "[B] WATCHDOG WARNING banner started (%d steps ~ 2s)\n", steps_2sec);
+            fflush(logfile);
+        }
+
+
+        if (g_wd_stop) {
+            fprintf(logfile, "[B] WATCHDOG STOP: received SIGTERM, exiting.\n");
+            fflush(logfile);
+            break; // exit from server loop
+        }
+
         // Queries current terminal size (for resizing).
         getmaxyx(stdscr, max_y, max_x);
 
@@ -128,7 +200,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
         if (main_width < 10) main_width = 10;
 
         // Needed to plot the colored items
-        initscr();
+        // initscr();
         start_color();
 
         // Enables color if terminal supports it
@@ -303,18 +375,37 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
         if (FD_ISSET(fd_from_d, &rfds)) {
             DroneStateMsg s;
             int n = read(fd_from_d, &s, sizeof(s));
+
+            // Heartbeat to watchdog: "system is alive and working"
+            if (pid_W > 0) {
+                kill(pid_W, SIGUSR1);
+            }
+
+            // Handles EOF from D
             if (n <= 0) {
                 mvprintw(1, 1, "[B] Dynamics process ended (EOF).");
                 refresh();
                 break;
             }
 
+
+            // Updates current state
             cur_state = s;
+
             // Increments global step counter (one more state update)
             if (!paused) {
                 g_step_counter++;
             }   
 
+            // Decrement watchdog banner countdown on each simulation step (done only when running)
+            if (!paused && g_wd_banner_steps_left > 0) {
+                g_wd_banner_steps_left--;
+                if (g_wd_banner_steps_left == 0) {
+                    g_wd_banner_msg = NULL;
+                }
+            }
+
+            // Logs state
             fprintf(logfile,
                     "STATE: x=%.2f y=%.2f vx=%.2f vy=%.2f\n",
                     s.x, s.y, s.vx, s.vy);
@@ -516,6 +607,16 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
                  "Controls: w e r / s d f / x c v | d=brake, p=pause, O=reset, q=quit");
         mvprintw(top_info_y2, 2,
                  "Paused: %s", paused ? "YES" : "NO");
+        // watchdog status     
+
+        // If watchdog banner active, print it after "Paused"
+        if (g_wd_banner_steps_left > 0 && g_wd_banner_msg != NULL) {
+            // Print banner starting at a safe column so it doesn't overwrite "Paused"
+            // mvprintw(top_info_y2, 18, "| %s", g_wd_banner_msg);
+            mvprintw(top_info_y2, 18, "| WD: %s", g_wd_banner_msg ? "WARNING" : "OK");
+        }
+
+        
 
         // Horizontal separator row (under top info)
         if (sep_y >= 1 && sep_y <= max_y - 2) {

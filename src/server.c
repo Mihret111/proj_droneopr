@@ -53,20 +53,30 @@ static void on_watchdog_stop(int signo) {
 }
 
 // ---------------- Watchdog banner UI state ----------------
-// Show a warning banner for a limited amount of time after SIGUSR2.
-// We store it as "how many simulation steps remaining".
+// Show a warning banner for a limited amount of time after SIGUSR2
+// We store it as "how many simulation steps remaining" to show the banner.
 
 static int g_wd_banner_steps_left = 0;  // countdown managed in main loop
 static const char *g_wd_banner_msg = NULL;
 
-// ----------------------------------------------------------------------
-// Runs the server process:
-//   - reads KeyStateMsg   from fd_kb (from I)
-//   - Sends ForceStateMsg to fd_to_d (to D)
-//   - Reads DroneStateMsg   from fd_from_d (from D)
-//   - Reads ObstacleMsg   from fd_obs (from B)
-//   - Reads TargetMsg   from fd_tgt (from B)
-// ----------------------------------------------------------------------
+/**
+ * @brief Main function for the Server (B) process.
+ *
+ * @details
+ * Acts as the "Blackboard" or central hub of the architecture.
+ * - **Responsibility**: Maintains the authoritative state of the world (drone, obstacles, targets).
+ * - **IPC Hub**: Multiplexes inputs from Keyboard (I), Dynamics (D), Obstacles (O), and Targets (T).
+ * - **Visualization**: Draws the ncurses UI.
+ * - **Synchronization**: Sends the official force commands to Dynamics to step the physics.
+ * 
+ * @param fd_kb      Pipe FD for reading KeyMsg from Keyboard (I).
+ * @param fd_to_d    Pipe FD for writing ForceStateMsg to Dynamics (D).
+ * @param fd_from_d  Pipe FD for reading DroneStateMsg from Dynamics (D).
+ * @param fd_obs     Pipe FD for reading obstacles from Generator (O).
+ * @param fd_tgt     Pipe FD for reading targets from Generator (T).
+ * @param pid_W      PID of the Watchdog process (for sending heartbeat signals).
+ * @param params     Simulation parameters.
+ */
 void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int fd_tgt, pid_t pid_W, SimParams params) 
 {
     // --- Opens logfile ---
@@ -76,13 +86,14 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
         die("[B] cannot open logs/server.log");
     }
     // --- Initialize ncurses ---
-    initscr();
+    initscr();      // Assignment-1 (previously was called inside loop which caused seldom window flickering issues)
     cbreak();
     noecho();
     curs_set(0);  // hide cursor
 
+    // Assignment-1 (previously was defined inside loop casing uneccessary repeated calls)
     // ---- ncurses color init (DO THIS ONCE) ----
-    if (has_colors()) {
+    if (has_colors()) {     
         start_color();
 
         // Only attempt init_color if terminal supports changing colors.
@@ -94,8 +105,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
         init_pair(1, COLOR_YELLOW, COLOR_BLACK); // obstacles
         init_pair(2, COLOR_GREEN,  COLOR_BLACK); // targets
     } else {
-        // No colors: we continue without colors (DO NOT EXIT).
-        // The sim should still run.
+        // If cmd doesnot permit colors, then continue without colors.
     }
 
     // ---------------- Install signal handlers for Watchdog ----------------
@@ -609,9 +619,9 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
 
         // If watchdog banner active, print it after "Paused"
         if (g_wd_banner_steps_left > 0 && g_wd_banner_msg != NULL) {
-            // Print banner starting at a safe column so it doesn't overwrite "Paused"
-            // mvprintw(top_info_y2, 18, "| %s", g_wd_banner_msg);
-            mvprintw(top_info_y2, 18, "| WD: %s", g_wd_banner_msg ? "WARNING" : "OK");
+            // Displays a visible banner
+            // "WD: WARNING" is now more explicit
+            mvprintw(top_info_y2, 18, "WD: %s", g_wd_banner_msg);
         }
 
         

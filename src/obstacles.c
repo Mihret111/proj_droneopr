@@ -11,11 +11,19 @@
 Obstacle g_obstacles[NUM_OBSTACLES];
 
 
-// ----------------------------------------------------------------------
-// Defines the obstacle process:
-//   - Sends ObstacleSetMsg to B via write_fd
-//   - Spawns obstacles at regular intervals
-// ----------------------------------------------------------------------
+/**
+ * @brief Run the Obstacle Generator (O) process.
+ * 
+ * @details
+ * Periodically spawns obstacles and sends them to the Server (B).
+ * - **Generation Logic**: 
+ *   - Samples random positions within the "safe" inner area (avoiding walls).
+ *   - Ensures minimum spacing between generated obstacles.
+ *   - (Note: Collision with targets is checked by Server (B) upon receipt).
+ * 
+ * @param pipe_fd Write-end pipe to Server (B).
+ * @param params  Simulation parameters (used for world boundaries).
+ */
 void run_obstacle_process(int write_fd, SimParams params) {
     FILE *log = open_process_log("obstacles", "O");
     if (!log) log = stderr;   // <-- don't die, just log to stderr
@@ -119,5 +127,5 @@ void run_obstacle_process(int write_fd, SimParams params) {
     }
     // Closes pipe to B
     close(write_fd);
-    _exit(EXIT_SUCCESS);
+    exit(EXIT_SUCCESS);
 }

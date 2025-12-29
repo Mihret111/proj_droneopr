@@ -1,10 +1,27 @@
-// main.c 
-// Defines the Master process:
-//   - Loads parameters
-//   - Creates pipes
-//   - Forks I, D, O, T, W
-//   - Becomes B, the server after bearing its children
-// ======================================================================
+/**
+ * @brief Entry point and Master Process orchestrator.
+ * 
+ * @details
+ * This file is responsible for booting the entire system architecture.
+ * 
+ * **Process Topology**:
+ * The Master process spawns 5 children and then *transforms* into the Server (B).
+ * 
+ *       [Keyboard I] ---> pipe_I_to_B ---> [Server B]
+ *       [Server B] <--- pipe_D_to_B <--- [Dynamics D]
+ *       [Server B] ---> pipe_D_to_B ---> [Dynamics D]
+ *       [Server B] <--- pipe_T_to_B <--- [Targets T]
+ *       [Server B] <--- pipe_O_to_B <--- [Obstacles O]
+ * 
+ *       [Watchdog W] <--- (Signals) ------ [All Processes]
+ * 
+ * **Key Responsibility**:
+ * 1. Load configuration (params.txt).
+ * 2. Create all communication pipes.
+ * 3. Fork all child processes (I, D, O, T, W).
+ * 4. Close unused pipe ends in each process (critical for EOF detection).
+ * 5. Parent process becomes the Server (B).
+ */
 
 #include "headers/params.h"
 #include "headers/util.h"
@@ -143,8 +160,8 @@ int main(void) {
         close(pipe_O_to_B[0]); close(pipe_O_to_B[1]);
         close(pipe_T_to_B[0]); close(pipe_T_to_B[1]);
 
-        // warn after 2 sec no heartbeat, kill after 5 sec
-        run_watchdog_process(pipe_CFG_to_W[0], 2, 15);
+        // warn after configured sec, kill after configured sec
+        run_watchdog_process(pipe_CFG_to_W[0], params.wd_warn_sec, params.wd_kill_sec);
     }
 
     // 8) PARENT: Becomes Server B

@@ -1,13 +1,14 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -g -Iheaders
+CFLAGS = -Wall -Wextra -g -Iheaders -I.
 LDFLAGS = -lncurses -lm
 TARGET = arp1
+BUILD_DIR = build
 
 # Source files
-SRCS = main.c server.c dynamics.c keyboard.c obstacles.c targets.c watchdog.c params.c util.c
+SRCS = src/main.c src/server.c src/dynamics.c src/keyboard.c src/obstacles.c src/targets.c src/watchdog.c src/params.c src/util.c
 
 # Object files
-OBJS = $(SRCS:.c=.o)
+OBJS = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 
 # Default target
 .PHONY: all
@@ -18,13 +19,14 @@ $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $(TARGET) $(LDFLAGS)
 
 # Compile source files into object files
-%.o: %.c
+$(BUILD_DIR)/%.o: src/%.c
+	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Clean up build artifacts
 .PHONY: clean
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -rf $(BUILD_DIR) $(TARGET)
 
 # Run the application
 .PHONY: run

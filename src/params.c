@@ -45,9 +45,13 @@ void init_default_params(SimParams *p) {
     p->force_step = 1.0;
     p->world_half = 50.0;
 
-    // Unused now, but ready for walls
+    // used for wall repulsion
     p->wall_clearance = 5.0;
     p->wall_gain      = 10;
+    
+    // Watchdog defaults
+    p->wd_warn_sec    = 2;
+    p->wd_kill_sec    = 10;
 }
 
 // Loads parameters from a simple "key=value" file.
@@ -89,6 +93,8 @@ void load_params_from_file(const char *filename, SimParams *p) {
         else if (strcmp(key, "world_half")     == 0) p->world_half = d;
         else if (strcmp(key, "wall_clearance") == 0) p->wall_clearance = d;
         else if (strcmp(key, "wall_gain")      == 0) p->wall_gain      = d;
+        else if (strcmp(key, "wd_warn_sec")    == 0) p->wd_warn_sec    = (int)d;
+        else if (strcmp(key, "wd_kill_sec")    == 0) p->wd_kill_sec    = (int)d;
         else {
             fprintf(stderr, "[PARAMS] Unknown key '%s', ignoring.\n", key);
         }

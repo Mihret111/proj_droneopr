@@ -13,12 +13,19 @@
 #include <time.h>
 #include <fcntl.h>
 
-// ----------------------------------------------------------------------
-// Defines the dynamics process:
-//   - Reads ForceStateMsg from force_fd (from B)
-//   - Integrates dynamics
-//   - Sends DroneStateMsg to state_fd (to B)
-// ----------------------------------------------------------------------
+/**
+ * @brief Main loop for the Dynamics (D) process.
+ * 
+ * @details
+ * Performs the physics simulation of the drone.
+ * - **Architecture**: Receives force commands (user + obstacles) from Server (B) and sends back updated state (pos, vel).
+ * - **Timing**: Runs at a fixed time step defined by params.dt (e.g., 0.01s).
+ * - **Integration**: Uses simple Euler integration for velocity and position updates.
+ * 
+ * @param force_fd File descriptor for reading ForceStateMsg from Server (B).
+ * @param state_fd File descriptor for writing DroneStateMsg to Server (B).
+ * @param params   Simulation parameters (Mass, Viscosity, Time step).
+ */
 void run_dynamics_process(int force_fd, int state_fd, SimParams params) {
     FILE *log = open_process_log("dynamics", "D");
     if (!log) {
@@ -91,10 +98,19 @@ void run_dynamics_process(int force_fd, int state_fd, SimParams params) {
         double Fx_total = f.Fx + Pwx;
         double Fy_total = f.Fy + Pwy;
 
-        // Integrates dynamics with total force
+        // --------------------------------------------------------------
+        // Physics Model: Newton's Second Law with Viscous Damping
+        // F_net = F_user + F_repulsion - K * v
+        // a = F_net / M
+        // --------------------------------------------------------------
         double ax = (Fx_total - K * s.vx) / M;
         double ay = (Fy_total - K * s.vy) / M;
 
+        // --------------------------------------------------------------
+        // Numerical Integration: Standard Euler Method
+        // v(t+dt) = v(t) + a * dt
+        // x(t+dt) = x(t) + v(t+dt) * dt
+        // --------------------------------------------------------------
         s.vx += ax * T;
         s.vy += ay * T;
 

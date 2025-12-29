@@ -14,11 +14,19 @@
 
 Target g_targets[NUM_TARGETS];
 
-// ----------------------------------------------------------------------
-// Defines the target process:
-//   - Sends TargetSetMsg to B via write_fd
-//   - Spawns targets at regular intervals
-// ----------------------------------------------------------------------
+/**
+ * @brief Run the Target Generator (T) process.
+ * 
+ * @details
+ * Periodically spawns targets and sends them to the Server (B).
+ * - **Generation Logic**:
+ *   - Samples random positions using polar coordinates (r, theta) for uniform disk distribution.
+ *   - Assigns a finite lifetime to each batch.
+ *   - Server (B) performs the final validation (filtering unsafe targets) before accepting.
+ * 
+ * @param pipe_fd Write-end pipe to Server (B).
+ * @param params  Simulation parameters (used for world boundaries).
+ */
 void run_target_process(int write_fd, SimParams params) {
     // opens log file
     FILE *log = open_process_log("targets", "T");
@@ -131,5 +139,5 @@ void run_target_process(int write_fd, SimParams params) {
         fclose(log);
     }
     close(write_fd);
-    _exit(EXIT_SUCCESS);
+    exit(EXIT_SUCCESS);
 }

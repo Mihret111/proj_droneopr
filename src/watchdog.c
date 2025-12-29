@@ -126,7 +126,7 @@ void run_watchdog_process(int cfg_read_fd, int warn_sec, int kill_sec) {
                 fflush(log);
             }
 
-            // Termination order: first tell B (so UI can exit), then the others
+            // Termination order: first tell B (so UI can exit), then the others active processes
             kill(p.pid_B, SIGTERM);
             kill(p.pid_I, SIGTERM);
             kill(p.pid_D, SIGTERM);

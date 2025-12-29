@@ -1,6 +1,6 @@
 # Architectural Documentation
 
-This project implements a simple 2D drone simulator using multiple POSIX processes and IPC primitives. The Master process initializes the simulation, creates communication pipes, and forks four child processes: **Keyboard (I)**, **Dynamics (D)**, **Obstacles (O)**, and **Targets (T)**. After forking, the Master process transitions into the **Server (B)** process. The server aggregates user input, environment information and simulation state, computes total forces (including wall and obstacle repulsion), and updates a User-Interface using `ncurses`.
+This project implements a simple 2D drone simulator using multiple POSIX processes and IPC primitives. The Master process initializes the simulation, creates communication pipes, and forks five child processes: **Keyboard (I)**, **Dynamics (D)**, **Obstacles (O)**, **Targets (T)**, and **Watchdog (W)**. After forking, the Master process transitions into the **Server (B)** process. The server aggregates user input, environment information and simulation state, computes total forces (including wall and obstacle repulsion), and updates a User-Interface using `ncurses`.
 
 # 1- Architecture Sketch
 
@@ -12,6 +12,9 @@ graph TD
     D -->|"DroneStateMsg"| B
     O["Obstacles (O)"] -->|"ObstacleSetMsg"| B
     T["Targets (T)"] -->|"TargetSetMsg"| B
+    B -.->|"SIGUSR1 (Heartbeat)"| W["Watchdog (W)"]
+    W -.->|"SIGUSR2 (Warn)"| B
+    W ==>|"SIGTERM (Kill)"| EXIT{"System Shutdown<br/>(B, I, D, O, T)"}
     end
 ```
 # 2. Active Components — Definitions, IPC, and Algorithms
@@ -120,34 +123,57 @@ graph TD
     - direction-vector utilities for virtual keys  
 
 
+## 2.8 Watchdog Process (W)
+- **Role**: System Health Monitor. Ensures the simulation is running responsively.
+- **IPC**:
+    - **Input**: `SIGUSR1` from Server (B) (Heartbeat)
+    - **Output**: 
+        - `SIGUSR2` to B (Warning)
+        - `SIGTERM` to All Processes (System Kill)
+- **Algorithms**:
+    - Monitors time since last heartbeat.
+    - If silence > 2s: Warns B (triggers UI banner).
+    - If silence > 10s: Terminates the entire system.
+    - The timeout values are configurable in `params.txt`.
+
 ## 3 File Organization
 
 ### 3.1 File Structure
 
 ```text
-.
-├── Architecture.md
-├── Makefile
-├── README.md
-├── headers
+proj_DroneGame/
+│
+├── src/          <-- Source files (.c)
+│   ├── main.c           # Entry point
+│   ├── server.c         # Blackboard server
+│   ├── dynamics.c       # Physics simulation
+│   ├── keyboard.c       # Input handling
+│   ├── obstacles.c      # Obstacle generation
+│   ├── targets.c        # Target generation
+│   ├── watchdog.c       # System monitor
+│   ├── params.c         # Config loader
+│   └── util.c           # Utilities
+│
+├── headers/      <-- Header files (.h)
+│   ├── server.h
 │   ├── dynamics.h
 │   ├── keyboard.h
-│   ├── messages.h
 │   ├── obstacles.h
-│   ├── params.h
-│   ├── server.h
 │   ├── targets.h
-│   └── util.h
-├── keyboard.c
-├── dynamics.c
-├── log.txt
-├── main.c
-├── obstacles.c
-├── params.c
-├── params.txt
-├── server.c
-├── targets.c
-└── util.c
+│   ├── watchdog.h
+│   ├── params.h
+│   ├── util.h
+│   └── messages.h
+│
+├── build/        <-- Compiled object files (.o)
+│
+├── logs/         <-- Runtime logs
+│
+├── install/      <-- Installation scripts
+│
+├── Makefile
+├── README.md
+└── Architecture.md
 ```
 
 
@@ -158,6 +184,7 @@ graph TD
 -   `keyboard.c`: Implementation of the Keyboard (I) process.
 -   `obstacles.c`: Implementation of the Obstacles (O) generator.
 -   `targets.c`: Implementation of the Targets (T) generator.
+-   `watchdog.c`: Implementation of the Watchdog (W) process.
 -   `params.c`: Helper functions for loading and initializing simulation parameters.
 -   `util.c`: Shared utility functions (math, logging, helpers).
 
@@ -167,13 +194,14 @@ graph TD
 *   `keyboard.h`: Keyboard definitions.
 *   `obstacles.h`: Obstacles definitions.
 *   `targets.h`: Targets definitions.
+*   `watchdog.h`: Watchdog definitions.
 *   `params.h`: Parameter definitions.
 *   `util.h`: Utility definitions.
 *   `messages.h`: IPC message structures.
 
 ### 3.4 Configuration
 -   `params.txt`: Runtime configuration of drone parameters (can be modified in real-time).
--   `log.txt`: Log file kept aside with redirected instantaneous values from the inspection window.
+-   `logs/`: Directory housing runtime logs for each process (e.g., `server.log`, `dynamics.log`, `watchdog.log`).
 
 #### 3.5 Build & Documentation
 *   `Makefile`: Build configuration.

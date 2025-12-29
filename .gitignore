@@ -19,6 +19,6 @@ targets.o
 util.o
 watchdog.o
 #.gitignore
-README.md
-Architecture.md
+#README.md
+#Architecture.md
 #Makefile

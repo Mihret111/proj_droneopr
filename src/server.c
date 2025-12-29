@@ -19,6 +19,8 @@
 #include "headers/util.h"
 #include "headers/obstacles.h"
 #include "headers/targets.h"
+#include <time.h>   // clock_gettime
+
 
 #include <ncurses.h>
 #include <stdio.h>
@@ -44,6 +46,28 @@ static int  wd_blink_phase   = 0;   // 0 or 1 (visible / invisible)
 static int  wd_blink_counter = 0;   // counts simulation steps
 
 static int wd_blink_ticks = 0;
+
+// ---- Heartbeat timing ----
+static struct timespec g_last_hb_ts;
+static int g_have_hb = 0; // becomes 1 after first heartbeat timestamp is recorded
+
+static double monotonic_now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
+}
+
+static void set_last_hb_now(void) {
+    clock_gettime(CLOCK_MONOTONIC, &g_last_hb_ts);
+    g_have_hb = 1;
+}
+
+static double hb_age_sec(void) {
+    if (!g_have_hb) return 0.0;
+    double now = monotonic_now_sec();
+    double last = (double)g_last_hb_ts.tv_sec + 1e-9 * (double)g_last_hb_ts.tv_nsec;
+    return now - last;
+}
 
 
 // ---------------- Watchdog signal flags (set by signal handlers) ----------------
@@ -91,6 +115,9 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
         endwin();
         die("[B] cannot open logs/server.log");
     }
+    // Initialize heartbeat tracking
+    set_last_hb_now(); // assume "alive" at start
+
     // --- Initialize ncurses ---
     initscr();      // Assignment-1 (previously was called inside loop which caused seldom window flickering issues)
     cbreak();
@@ -110,6 +137,7 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
 
         init_pair(1, COLOR_YELLOW, COLOR_BLACK); // obstacles
         init_pair(2, COLOR_GREEN,  COLOR_BLACK); // targets
+        init_pair(3, COLOR_RED,    COLOR_BLACK); // watchdog warning
     } else {
         // If cmd doesnot permit colors, then continue without colors.
     }
@@ -409,8 +437,23 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
             DroneStateMsg s;
             int n = read(fd_from_d, &s, sizeof(s));
             if (n == (int)sizeof(s)) {
+                // We received a valid "tick" from dynamics => system is alive
+                set_last_hb_now();
+
+                // Send heartbeat to watchdog (as before)
                 if (pid_W > 0) kill(pid_W, SIGUSR1);
-            } else if (n <= 0) {
+
+                // POLISH: if we were blinking due to warning, clear it once activity resumes
+                if (wd_warning_active) {
+                    wd_warning_active = 0;
+                    wd_blink_phase = 0;
+                    wd_blink_counter = 0;
+
+                    fprintf(logfile, "[B] Heartbeat resumed -> cleared watchdog warning UI\n");
+                    fflush(logfile);
+                }
+            }
+            else if (n <= 0) {
                 mvprintw(1, 1, "[B] Dynamics process ended (EOF).");
                 refresh();
                 break;
@@ -577,10 +620,10 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
             int n = read(fd_tgt, &msg, sizeof(msg));
             if (n <= 0) {
                 mvprintw(1, 1, "[B] Target generator ended.");
-                } else {
-        if (paused) {
-            fprintf(logfile,
-                    "[B] Received target set but PAUSED -> ignored.\n");
+            } else {
+                if (paused) {
+                    fprintf(logfile,
+                            "[B] Received target set but PAUSED -> ignored.\n");
             fflush(logfile);
         } else {
             int requested = msg.count;
@@ -650,13 +693,33 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
                  "Controls: w e r / s d f / x c v | d=brake, p=pause, O=reset, q=quit");
         mvprintw(top_info_y2, 2,
                  "Paused: %s", paused ? "YES" : "NO");
-           
+        
         // Watchdog blinking warning: visible only when active AND blink phase is ON
+        // --- Watchdog live timing info ---
+        double age = hb_age_sec();  // seconds since last valid DroneStateMsg
+        double warn_in = (double)params.wd_warn_sec - age;
+        double kill_in = (double)params.wd_kill_sec - age;
+
+        if (warn_in < 0) warn_in = 0;
+        if (kill_in < 0) kill_in = 0;
+
         if (wd_warning_active && wd_blink_phase) {
-            attron(A_BOLD | A_REVERSE);
-            mvprintw(top_info_y2, 18, " %s ", watchdog_banner_msg);
-            attroff(A_BOLD | A_REVERSE);
+            // If colors exist, use a red-ish pair. Otherwise use reverse + bold.
+            if (has_colors()) {
+                // Create once somewhere during init if you want:
+                // init_pair(3, COLOR_RED, COLOR_BLACK);
+                attron(COLOR_PAIR(3) | A_BOLD | A_REVERSE);
+                mvprintw(top_info_y2, 18, " %s ", watchdog_banner_msg);
+                mvprintw(top_info_y2, 60, "KILL IN: %.2fs", kill_in);
+                attroff(COLOR_PAIR(3) | A_BOLD | A_REVERSE);
+            } else {
+                attron(A_BOLD | A_REVERSE);
+                mvprintw(top_info_y2, 18, " %s ", watchdog_banner_msg);
+                mvprintw(top_info_y2, 60, "KILL IN: %.2fs", kill_in);
+                attroff(A_BOLD | A_REVERSE);
+            }
         }
+
 
 
         
@@ -772,3 +835,4 @@ void run_server_process(int fd_kb, int fd_to_d, int fd_from_d, int fd_obs, int f
     close(fd_from_d);
     exit(EXIT_SUCCESS); 
 }
+

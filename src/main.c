@@ -192,8 +192,7 @@ int main(void) {
                         pipe_D_to_B[0],
                         pipe_O_to_B[0],
                         pipe_T_to_B[0],
-                        pid_W,
-                        params);
+                        pid_W,params);
 
     // 9) Waits for children to avoid zombies (good practice)
     // Forked 5 children: I, D, O, T, W

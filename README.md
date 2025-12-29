@@ -128,11 +128,12 @@ The following describes how the drone world responds to user actions and how the
 
 ### Watchdog Behavior
 - **Role**: Ensures the system is responsive.
+- **Chain of Trust**: The Server only sends a heartbeat when it receives a physics update. Thus, the Watchdog effectively monitors the entire simulation loop (Dynamics + Server), not just the Server process.
 - **Mechanism**:
   - The **Server (B)** sends a `SIGUSR1` "heartbeat" signal to the **Watchdog (W)** every time it receives a state update from Dynamics (every `dt`).
 - **Failure Modes**:
-  1.  **Warning**: If no heartbeat is received for **2 seconds**, W sends `SIGUSR2` to B, triggering a "WATCHDOG WARNING" notification on the UI.
-  2.  **Termination**: If no heartbeat is received for **10 seconds**, W sends `SIGTERM` to all processes, safely shutting down the simulation.
+  1.  **Warning**: If no heartbeat is received for **2 seconds** (configured via `wd_warn_sec`), W sends `SIGUSR2` to B, triggering a **blinking "WATCHDOG WARNING" banner** on the UI. The UI also displays a **countdown timer** showing the time remaining until system termination. If the system resumes (Server receives valid input), the warning automatically vanishes.
+  2.  **Termination**: If no heartbeat is received for **10 seconds** (configured via `wd_kill_sec`), W sends `SIGTERM` to all processes, safely shutting down the simulation.
 
 ## 10. Logging
 The system implements a per-process logging strategy. Upon startup, the `logs/` directory is automatically created if it does not exist.

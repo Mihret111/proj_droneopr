@@ -121,11 +121,14 @@ graph TD
     - distance filtering functions  
     - random sampling helpers  
     - direction-vector utilities for virtual keys 
-    - logging handlers for processes
+    - generic logging handlers for processes
 
 
 ## 2.8 Watchdog Process (W)
 - **Role**: System Health Monitor. Ensures the simulation is running responsively.
+- **Design ("Chain of Trust")**: 
+    - The Server (B) sends a heartbeat `SIGUSR1` to Watchdog (W) **only** after receiving a valid state update from Dynamics (D).
+    - This effectively monitors the **Physics Loop**: if D freezes, B stops receiving updates, stops sending heartbeats, and W triggers a reset/warning.
 - **IPC**:
     - **Input**: `SIGUSR1` from Server (B) (Heartbeat)
     - **Output**: 
@@ -133,7 +136,7 @@ graph TD
         - `SIGTERM` to All Processes (System Kill)
 - **Algorithms**:
     - Monitors time since last heartbeat.
-    - If silence > 2s: Warns B (triggers UI banner).
+    - If silence > 2s: Warns B (triggers **blinking UI banner** with a **countdown timer**). The warning is cleared if the system resumes.
     - If silence > 10s: Terminates the entire system.
     - The timeout values are configurable in `params.txt`.
 
